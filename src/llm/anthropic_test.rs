@@ -21,8 +21,7 @@ fn test_request_serialization() {
 
 #[test]
 fn test_request_json_format() {
-    let req = Request::new("claude-sonnet-4-20250514")
-        .message(Message::user("Hello"));
+    let req = Request::new("claude-sonnet-4-20250514").message(Message::user("Hello"));
 
     let anthropic_req = AnthropicRequest::from(&req);
     let json = serde_json::to_value(&anthropic_req).unwrap();
@@ -96,9 +95,7 @@ fn test_tool_use_response() {
 
 #[test]
 fn test_tool_result_message() {
-    let msg = Message::tool_results(vec![
-        ContentBlock::tool_result("tu_1", "Hello, Alice!"),
-    ]);
+    let msg = Message::tool_results(vec![ContentBlock::tool_result("tu_1", "Hello, Alice!")]);
 
     let anthropic_msg = AnthropicMessage::from(&msg);
     let json = serde_json::to_value(&anthropic_msg).unwrap();

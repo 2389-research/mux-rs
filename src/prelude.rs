@@ -3,8 +3,8 @@
 
 pub use crate::error::{LlmError, McpError, MuxError, PermissionError, ToolError};
 pub use crate::llm::{
-    ContentBlock, LlmClient, Message, Request, Response, Role, StopReason, StreamEvent,
-    ToolDefinition, Usage,
+    AnthropicClient, ContentBlock, LlmClient, Message, Request, Response, Role, StopReason,
+    StreamEvent, ToolDefinition, Usage,
 };
 pub use crate::mcp::{McpServerConfig, McpToolInfo, McpToolResult, McpTransport};
 pub use crate::permission::{

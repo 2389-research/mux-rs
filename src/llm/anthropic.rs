@@ -1,13 +1,13 @@
 // ABOUTME: Anthropic Claude API client implementation.
 // ABOUTME: Implements LlmClient trait for Claude models.
 
-use serde::{Deserialize, Serialize};
+use super::client::StreamEvent;
+use super::{ContentBlock, Message, Request, Response, StopReason, ToolDefinition, Usage};
+use crate::error::LlmError;
 use async_trait::async_trait;
 use futures::Stream;
+use serde::{Deserialize, Serialize};
 use std::pin::Pin;
-use super::{ContentBlock, Message, Request, Response, StopReason, ToolDefinition, Usage};
-use super::client::StreamEvent;
-use crate::error::LlmError;
 
 const ANTHROPIC_API_URL: &str = "https://api.anthropic.com/v1/messages";
 const ANTHROPIC_VERSION: &str = "2023-06-01";
@@ -39,9 +39,20 @@ pub struct AnthropicMessage {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AnthropicContent {
-    Text { text: String },
-    ToolUse { id: String, name: String, input: serde_json::Value },
-    ToolResult { tool_use_id: String, content: String, #[serde(default)] is_error: bool },
+    Text {
+        text: String,
+    },
+    ToolUse {
+        id: String,
+        name: String,
+        input: serde_json::Value,
+    },
+    ToolResult {
+        tool_use_id: String,
+        content: String,
+        #[serde(default)]
+        is_error: bool,
+    },
 }
 
 /// Anthropic tool definition.
@@ -166,13 +177,15 @@ impl From<&ContentBlock> for AnthropicContent {
                 name: name.clone(),
                 input: input.clone(),
             },
-            ContentBlock::ToolResult { tool_use_id, content, is_error } => {
-                AnthropicContent::ToolResult {
-                    tool_use_id: tool_use_id.clone(),
-                    content: content.clone(),
-                    is_error: *is_error,
-                }
-            }
+            ContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+            } => AnthropicContent::ToolResult {
+                tool_use_id: tool_use_id.clone(),
+                content: content.clone(),
+                is_error: *is_error,
+            },
         }
     }
 }
@@ -181,10 +194,18 @@ impl From<AnthropicContent> for ContentBlock {
     fn from(content: AnthropicContent) -> Self {
         match content {
             AnthropicContent::Text { text } => ContentBlock::Text { text },
-            AnthropicContent::ToolUse { id, name, input } => ContentBlock::ToolUse { id, name, input },
-            AnthropicContent::ToolResult { tool_use_id, content, is_error } => {
-                ContentBlock::ToolResult { tool_use_id, content, is_error }
+            AnthropicContent::ToolUse { id, name, input } => {
+                ContentBlock::ToolUse { id, name, input }
             }
+            AnthropicContent::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+            } => ContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+            },
         }
     }
 }
@@ -266,12 +287,13 @@ fn parse_sse_event(event_str: &str) -> Option<StreamEvent> {
             id: message.id,
             model: message.model,
         }),
-        AnthropicStreamEvent::ContentBlockStart { index, content_block } => {
-            Some(StreamEvent::ContentBlockStart {
-                index,
-                block: ContentBlock::from(content_block),
-            })
-        }
+        AnthropicStreamEvent::ContentBlockStart {
+            index,
+            content_block,
+        } => Some(StreamEvent::ContentBlockStart {
+            index,
+            block: ContentBlock::from(content_block),
+        }),
         AnthropicStreamEvent::ContentBlockDelta { index, delta } => {
             let text = match delta {
                 AnthropicDelta::TextDelta { text } => text,
