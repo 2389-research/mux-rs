@@ -129,3 +129,10 @@ async fn test_conditional_policy() {
         Decision::Deny
     );
 }
+
+#[test]
+fn test_anthropic_client_construction() {
+    let client = mux::llm::AnthropicClient::new("test-api-key");
+    // Just verify it constructs without panicking
+    let _ = client;
+}
