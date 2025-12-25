@@ -58,7 +58,10 @@ async fn test_registry_with_policy() {
     assert_eq!(decision, Decision::Allow);
 
     // Execute tool
-    let result = tool.execute(params).await.expect("Execution should succeed");
+    let result = tool
+        .execute(params)
+        .await
+        .expect("Execution should succeed");
     assert_eq!(result.content, "Hello, World!");
     assert!(!result.is_error);
 }

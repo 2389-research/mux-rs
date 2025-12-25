@@ -57,11 +57,11 @@ impl Policy {
                 PolicyRule::Allow(name) if name == tool => return Decision::Allow,
                 PolicyRule::Deny(name) if name == tool => return Decision::Deny,
                 PolicyRule::AllowPattern(pattern) if pattern.matches(tool) => {
-                    return Decision::Allow
+                    return Decision::Allow;
                 }
                 PolicyRule::DenyPattern(pattern) if pattern.matches(tool) => return Decision::Deny,
                 PolicyRule::Conditional { tool: t, condition } if t == tool => {
-                    return condition(params)
+                    return condition(params);
                 }
                 _ => continue,
             }

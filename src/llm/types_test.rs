@@ -6,13 +6,22 @@ use super::*;
 #[test]
 fn test_role_serialization() {
     assert_eq!(serde_json::to_string(&Role::User).unwrap(), "\"user\"");
-    assert_eq!(serde_json::to_string(&Role::Assistant).unwrap(), "\"assistant\"");
+    assert_eq!(
+        serde_json::to_string(&Role::Assistant).unwrap(),
+        "\"assistant\""
+    );
 }
 
 #[test]
 fn test_role_deserialization() {
-    assert_eq!(serde_json::from_str::<Role>("\"user\"").unwrap(), Role::User);
-    assert_eq!(serde_json::from_str::<Role>("\"assistant\"").unwrap(), Role::Assistant);
+    assert_eq!(
+        serde_json::from_str::<Role>("\"user\"").unwrap(),
+        Role::User
+    );
+    assert_eq!(
+        serde_json::from_str::<Role>("\"assistant\"").unwrap(),
+        Role::Assistant
+    );
 }
 
 #[test]
@@ -124,7 +133,16 @@ fn test_response_no_tool_use() {
 
 #[test]
 fn test_stop_reason_serialization() {
-    assert_eq!(serde_json::to_string(&StopReason::EndTurn).unwrap(), "\"end_turn\"");
-    assert_eq!(serde_json::to_string(&StopReason::ToolUse).unwrap(), "\"tool_use\"");
-    assert_eq!(serde_json::to_string(&StopReason::MaxTokens).unwrap(), "\"max_tokens\"");
+    assert_eq!(
+        serde_json::to_string(&StopReason::EndTurn).unwrap(),
+        "\"end_turn\""
+    );
+    assert_eq!(
+        serde_json::to_string(&StopReason::ToolUse).unwrap(),
+        "\"tool_use\""
+    );
+    assert_eq!(
+        serde_json::to_string(&StopReason::MaxTokens).unwrap(),
+        "\"max_tokens\""
+    );
 }

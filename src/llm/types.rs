@@ -189,7 +189,9 @@ pub struct Response {
 impl Response {
     /// Check if the response contains tool use blocks.
     pub fn has_tool_use(&self) -> bool {
-        self.content.iter().any(|b| matches!(b, ContentBlock::ToolUse { .. }))
+        self.content
+            .iter()
+            .any(|b| matches!(b, ContentBlock::ToolUse { .. }))
     }
 
     /// Extract all tool use blocks from the response.
