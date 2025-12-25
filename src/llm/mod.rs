@@ -11,3 +11,6 @@ pub use types::*;
 
 #[cfg(test)]
 mod types_test;
+
+#[cfg(test)]
+mod anthropic_test;
