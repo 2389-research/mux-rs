@@ -2,5 +2,6 @@
 // ABOUTME: Re-exports all public types from submodules.
 
 pub mod error;
+pub mod llm;
 
 pub use error::MuxError;
