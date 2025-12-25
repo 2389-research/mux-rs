@@ -84,6 +84,53 @@ pub struct AnthropicErrorDetail {
     pub message: String,
 }
 
+/// Server-sent event from Anthropic streaming API.
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum AnthropicStreamEvent {
+    MessageStart {
+        message: AnthropicMessageStart,
+    },
+    ContentBlockStart {
+        index: usize,
+        content_block: AnthropicContent,
+    },
+    ContentBlockDelta {
+        index: usize,
+        delta: AnthropicDelta,
+    },
+    ContentBlockStop {
+        index: usize,
+    },
+    MessageDelta {
+        delta: AnthropicMessageDeltaData,
+        usage: AnthropicUsage,
+    },
+    MessageStop,
+    Ping,
+    Error {
+        error: AnthropicErrorDetail,
+    },
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AnthropicMessageStart {
+    pub id: String,
+    pub model: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum AnthropicDelta {
+    TextDelta { text: String },
+    InputJsonDelta { partial_json: String },
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AnthropicMessageDeltaData {
+    pub stop_reason: Option<String>,
+}
+
 /// Client for the Anthropic Claude API.
 #[derive(Debug, Clone)]
 pub struct AnthropicClient {
@@ -202,6 +249,55 @@ impl From<AnthropicResponse> for Response {
     }
 }
 
+fn parse_sse_event(event_str: &str) -> Option<StreamEvent> {
+    let mut data = None;
+
+    for line in event_str.lines() {
+        if let Some(rest) = line.strip_prefix("data: ") {
+            data = Some(rest.to_string());
+        }
+    }
+
+    let data = data?;
+    let anthropic_event: AnthropicStreamEvent = serde_json::from_str(&data).ok()?;
+
+    match anthropic_event {
+        AnthropicStreamEvent::MessageStart { message } => Some(StreamEvent::MessageStart {
+            id: message.id,
+            model: message.model,
+        }),
+        AnthropicStreamEvent::ContentBlockStart { index, content_block } => {
+            Some(StreamEvent::ContentBlockStart {
+                index,
+                block: ContentBlock::from(content_block),
+            })
+        }
+        AnthropicStreamEvent::ContentBlockDelta { index, delta } => {
+            let text = match delta {
+                AnthropicDelta::TextDelta { text } => text,
+                AnthropicDelta::InputJsonDelta { partial_json } => partial_json,
+            };
+            Some(StreamEvent::ContentBlockDelta { index, text })
+        }
+        AnthropicStreamEvent::ContentBlockStop { index } => {
+            Some(StreamEvent::ContentBlockStop { index })
+        }
+        AnthropicStreamEvent::MessageDelta { delta, usage } => Some(StreamEvent::MessageDelta {
+            stop_reason: delta.stop_reason.map(|s| parse_stop_reason(&s)),
+            usage: Usage {
+                input_tokens: usage.input_tokens,
+                output_tokens: usage.output_tokens,
+            },
+        }),
+        AnthropicStreamEvent::MessageStop => Some(StreamEvent::MessageStop),
+        AnthropicStreamEvent::Ping => None,
+        AnthropicStreamEvent::Error { error } => {
+            eprintln!("Stream error: {}", error.message);
+            None
+        }
+    }
+}
+
 #[async_trait]
 impl super::client::LlmClient for AnthropicClient {
     async fn create_message(&self, req: &Request) -> Result<Response, LlmError> {
@@ -232,9 +328,52 @@ impl super::client::LlmClient for AnthropicClient {
 
     fn create_message_stream(
         &self,
-        _req: &Request,
+        req: &Request,
     ) -> Pin<Box<dyn Stream<Item = Result<StreamEvent, LlmError>> + Send + 'static>> {
-        // TODO: Implement streaming in next task
-        Box::pin(futures::stream::empty())
+        let mut anthropic_req = AnthropicRequest::from(req);
+        anthropic_req.stream = Some(true);
+
+        let api_key = self.api_key.clone();
+        let http = self.http.clone();
+
+        Box::pin(async_stream::try_stream! {
+            let response = http
+                .post(ANTHROPIC_API_URL)
+                .header("x-api-key", &api_key)
+                .header("anthropic-version", ANTHROPIC_VERSION)
+                .header("content-type", "application/json")
+                .json(&anthropic_req)
+                .send()
+                .await?;
+
+            let status = response.status();
+            if !status.is_success() {
+                let error_text = response.text().await?;
+                let error: AnthropicError = serde_json::from_str(&error_text)?;
+                Err(LlmError::Api {
+                    status: status.as_u16(),
+                    message: error.error.message,
+                })?;
+                return;
+            }
+
+            let mut stream = response.bytes_stream();
+            let mut buffer = String::new();
+
+            while let Some(chunk) = futures::StreamExt::next(&mut stream).await {
+                let chunk = chunk?;
+                buffer.push_str(&String::from_utf8_lossy(&chunk));
+
+                // Process complete SSE events
+                while let Some(pos) = buffer.find("\n\n") {
+                    let event_str = buffer[..pos].to_string();
+                    buffer = buffer[pos + 2..].to_string();
+
+                    if let Some(event) = parse_sse_event(&event_str) {
+                        yield event;
+                    }
+                }
+            }
+        })
     }
 }
