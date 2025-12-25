@@ -3,6 +3,7 @@
 
 pub mod error;
 pub mod llm;
+pub mod mcp;
 pub mod permission;
 pub mod tool;
 
