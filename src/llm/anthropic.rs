@@ -2,7 +2,15 @@
 // ABOUTME: Implements LlmClient trait for Claude models.
 
 use serde::{Deserialize, Serialize};
+use async_trait::async_trait;
+use futures::Stream;
+use std::pin::Pin;
 use super::{ContentBlock, Message, Request, Response, StopReason, ToolDefinition, Usage};
+use super::client::StreamEvent;
+use crate::error::LlmError;
+
+const ANTHROPIC_API_URL: &str = "https://api.anthropic.com/v1/messages";
+const ANTHROPIC_VERSION: &str = "2023-06-01";
 
 /// Anthropic API request format.
 #[derive(Debug, Serialize)]
@@ -74,6 +82,32 @@ pub struct AnthropicErrorDetail {
     #[serde(rename = "type")]
     pub error_type: String,
     pub message: String,
+}
+
+/// Client for the Anthropic Claude API.
+#[derive(Debug, Clone)]
+pub struct AnthropicClient {
+    api_key: String,
+    http: reqwest::Client,
+}
+
+impl AnthropicClient {
+    /// Create a new Anthropic client with the given API key.
+    pub fn new(api_key: impl Into<String>) -> Self {
+        Self {
+            api_key: api_key.into(),
+            http: reqwest::Client::new(),
+        }
+    }
+
+    /// Create a new Anthropic client from the ANTHROPIC_API_KEY environment variable.
+    pub fn from_env() -> Result<Self, LlmError> {
+        let api_key = std::env::var("ANTHROPIC_API_KEY").map_err(|_| LlmError::Api {
+            status: 0,
+            message: "ANTHROPIC_API_KEY environment variable not set".to_string(),
+        })?;
+        Ok(Self::new(api_key))
+    }
 }
 
 impl From<&ContentBlock> for AnthropicContent {
@@ -165,5 +199,42 @@ impl From<AnthropicResponse> for Response {
                 output_tokens: resp.usage.output_tokens,
             },
         }
+    }
+}
+
+#[async_trait]
+impl super::client::LlmClient for AnthropicClient {
+    async fn create_message(&self, req: &Request) -> Result<Response, LlmError> {
+        let anthropic_req = AnthropicRequest::from(req);
+
+        let response = self
+            .http
+            .post(ANTHROPIC_API_URL)
+            .header("x-api-key", &self.api_key)
+            .header("anthropic-version", ANTHROPIC_VERSION)
+            .header("content-type", "application/json")
+            .json(&anthropic_req)
+            .send()
+            .await?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let error: AnthropicError = response.json().await?;
+            return Err(LlmError::Api {
+                status: status.as_u16(),
+                message: error.error.message,
+            });
+        }
+
+        let anthropic_resp: AnthropicResponse = response.json().await?;
+        Ok(Response::from(anthropic_resp))
+    }
+
+    fn create_message_stream(
+        &self,
+        _req: &Request,
+    ) -> Pin<Box<dyn Stream<Item = Result<StreamEvent, LlmError>> + Send + 'static>> {
+        // TODO: Implement streaming in next task
+        Box::pin(futures::stream::empty())
     }
 }
