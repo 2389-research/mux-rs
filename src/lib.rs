@@ -3,5 +3,6 @@
 
 pub mod error;
 pub mod llm;
+pub mod tool;
 
 pub use error::MuxError;
