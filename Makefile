@@ -1,12 +1,19 @@
-.PHONY: demo test build clean clippy fmt check
+.PHONY: demo code-agent test build clean clippy fmt check
 
-# Run the agent-test-tui demo
+# Run the agent-test-tui demo (MCP tools)
 demo:
 	cargo run -p agent-test-tui
 
-# Run the demo in release mode
+# Run the code-agent (built-in coding tools)
+code-agent:
+	cargo run -p code-agent
+
+# Run demos in release mode
 demo-release:
 	cargo run -p agent-test-tui --release
+
+code-agent-release:
+	cargo run -p code-agent --release
 
 # Run all tests
 test:

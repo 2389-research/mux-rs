@@ -1,0 +1,16 @@
+[package]
+name = "code-agent"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+mux = { path = ".." }
+tokio = { version = "1", features = ["full"] }
+rustyline = "14"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+async-trait = "0.1"
+dotenvy = "0.15"
+glob = "0.3"
+regex = "1"
