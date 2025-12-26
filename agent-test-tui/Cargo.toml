@@ -1,0 +1,13 @@
+[package]
+name = "agent-test-tui"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+mux = { path = ".." }
+tokio = { version = "1", features = ["full"] }
+rustyline = "14"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+dirs = "5"
