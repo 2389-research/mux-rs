@@ -123,11 +123,15 @@ async fn run_agent_loop(registry: &Registry) -> Result<()> {
                                     Ok(result) => {
                                         println!("Result: {}\n", result.content);
                                         if result.is_error {
-                                            tool_results
-                                                .push(ContentBlock::tool_error(id, &result.content));
+                                            tool_results.push(ContentBlock::tool_error(
+                                                id,
+                                                &result.content,
+                                            ));
                                         } else {
-                                            tool_results
-                                                .push(ContentBlock::tool_result(id, &result.content));
+                                            tool_results.push(ContentBlock::tool_result(
+                                                id,
+                                                &result.content,
+                                            ));
                                         }
                                     }
                                     Err(e) => {

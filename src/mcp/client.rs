@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{Mutex, mpsc};
 
 use super::{McpRequest, McpResponse, McpServerConfig, McpTransport};
 use crate::error::McpError;
@@ -24,7 +24,9 @@ impl McpClient {
     /// Connect to an MCP server.
     pub async fn connect(config: McpServerConfig) -> Result<Self, McpError> {
         let McpTransport::Stdio { command, args, env } = &config.transport else {
-            return Err(McpError::Connection("Only stdio transport supported".into()));
+            return Err(McpError::Connection(
+                "Only stdio transport supported".into(),
+            ));
         };
 
         let mut cmd = Command::new(command);
@@ -34,7 +36,9 @@ impl McpClient {
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit());
 
-        let mut child = cmd.spawn().map_err(|e| McpError::Connection(e.to_string()))?;
+        let mut child = cmd
+            .spawn()
+            .map_err(|e| McpError::Connection(e.to_string()))?;
 
         let stdin = child
             .stdin
