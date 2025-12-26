@@ -6,7 +6,7 @@ pub use crate::llm::{
     AnthropicClient, ContentBlock, LlmClient, Message, Request, Response, Role, StopReason,
     StreamEvent, ToolDefinition, Usage,
 };
-pub use crate::mcp::{McpServerConfig, McpToolInfo, McpToolResult, McpTransport};
+pub use crate::mcp::{McpClient, McpProxyTool, McpServerConfig, McpToolInfo, McpToolResult, McpTransport};
 pub use crate::permission::{
     AlwaysApprove, AlwaysReject, ApprovalContext, ApprovalHandler, Decision, Policy, PolicyBuilder,
 };
