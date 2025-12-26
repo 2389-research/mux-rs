@@ -215,13 +215,13 @@ async fn main() -> Result<()> {
     let tool_count = registry.list().await.len();
     println!("\nReady with {} tools.", tool_count);
 
-    // Run agent loop
-    run_agent_loop(&registry).await?;
+    // Run agent loop, ensuring cleanup runs even on error
+    let result = run_agent_loop(&registry).await;
 
-    // Cleanup
+    // Cleanup MCP clients (always runs)
     for client in mcp_clients {
         let _ = client.shutdown().await;
     }
 
-    Ok(())
+    result
 }

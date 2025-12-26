@@ -48,12 +48,15 @@ impl Tool for McpProxyTool {
         let result = self.client.call_tool(&self.info.name, params).await?;
 
         // Convert MCP result to ToolResult by extracting text from content blocks
+        // Note: Image content is represented as a placeholder since ToolResult is text-only
         let content = result
             .content
             .iter()
-            .filter_map(|c| match c {
-                McpContentBlock::Text { text } => Some(text.clone()),
-                McpContentBlock::Image { .. } => None,
+            .map(|c| match c {
+                McpContentBlock::Text { text } => text.clone(),
+                McpContentBlock::Image { mime_type, .. } => {
+                    format!("[Image: {}]", mime_type)
+                }
             })
             .collect::<Vec<_>>()
             .join("\n");

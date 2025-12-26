@@ -4,13 +4,18 @@
 use std::collections::HashMap;
 use std::process::Stdio;
 use std::sync::Arc;
+use std::time::Duration;
 
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::{Mutex, mpsc};
+use tokio::task::JoinHandle;
 
 use super::{McpRequest, McpResponse, McpServerConfig, McpTransport};
 use crate::error::McpError;
+
+/// Default timeout for MCP requests in seconds.
+const REQUEST_TIMEOUT_SECS: u64 = 30;
 
 /// Client for communicating with an MCP server.
 pub struct McpClient {
@@ -18,6 +23,7 @@ pub struct McpClient {
     child: Mutex<Option<Child>>,
     stdin: Mutex<Option<tokio::process::ChildStdin>>,
     pending: Arc<Mutex<HashMap<u64, mpsc::Sender<McpResponse>>>>,
+    reader_handle: Mutex<Option<JoinHandle<()>>>,
 }
 
 impl McpClient {
@@ -55,16 +61,26 @@ impl McpClient {
 
         // Spawn reader task
         let pending_clone = pending.clone();
-        tokio::spawn(async move {
+        let reader_handle = tokio::spawn(async move {
             let mut reader = BufReader::new(stdout).lines();
-            while let Ok(Some(line)) = reader.next_line().await {
-                if let Ok(response) = serde_json::from_str::<McpResponse>(&line) {
-                    let mut pending = pending_clone.lock().await;
-                    if let Some(tx) = pending.remove(&response.id) {
-                        let _ = tx.send(response).await;
+            loop {
+                match reader.next_line().await {
+                    Ok(Some(line)) => {
+                        if let Ok(response) = serde_json::from_str::<McpResponse>(&line) {
+                            let mut pending = pending_clone.lock().await;
+                            if let Some(tx) = pending.remove(&response.id) {
+                                let _ = tx.send(response).await;
+                            }
+                        }
+                        // Notifications and unparseable messages are silently ignored
                     }
+                    Ok(None) => break, // EOF
+                    Err(_) => break,   // I/O error
                 }
             }
+            // Clean up any pending requests on disconnect - dropping senders
+            // will cause receivers to return None
+            pending_clone.lock().await.clear();
         });
 
         Ok(Self {
@@ -72,10 +88,11 @@ impl McpClient {
             child: Mutex::new(Some(child)),
             stdin: Mutex::new(Some(stdin)),
             pending,
+            reader_handle: Mutex::new(Some(reader_handle)),
         })
     }
 
-    /// Send a request and wait for response.
+    /// Send a request and wait for response with timeout.
     pub async fn request(
         &self,
         method: &str,
@@ -90,19 +107,34 @@ impl McpClient {
             pending.insert(id, tx);
         }
 
-        let json = serde_json::to_string(&request)?;
-        {
+        // Write request to stdin, cleaning up pending on failure
+        let write_result = async {
+            let json = serde_json::to_string(&request)?;
             let mut stdin = self.stdin.lock().await;
-            if let Some(ref mut stdin) = *stdin {
-                stdin.write_all(json.as_bytes()).await?;
-                stdin.write_all(b"\n").await?;
-                stdin.flush().await?;
-            }
+            let stdin_ref = stdin
+                .as_mut()
+                .ok_or_else(|| McpError::Connection("Server connection closed".into()))?;
+            stdin_ref.write_all(json.as_bytes()).await?;
+            stdin_ref.write_all(b"\n").await?;
+            stdin_ref.flush().await?;
+            Ok::<_, McpError>(())
+        }
+        .await;
+
+        if let Err(e) = write_result {
+            self.pending.lock().await.remove(&id);
+            return Err(e);
         }
 
-        rx.recv()
-            .await
-            .ok_or(McpError::Protocol("No response received".into()))
+        // Wait for response with timeout
+        match tokio::time::timeout(Duration::from_secs(REQUEST_TIMEOUT_SECS), rx.recv()).await {
+            Ok(Some(response)) => Ok(response),
+            Ok(None) => Err(McpError::Protocol("No response received".into())),
+            Err(_) => {
+                self.pending.lock().await.remove(&id);
+                Err(McpError::Protocol("Request timed out".into()))
+            }
+        }
     }
 
     /// Get the server name.
@@ -135,11 +167,12 @@ impl McpClient {
         let json = serde_json::to_string(&notification)?;
         {
             let mut stdin = self.stdin.lock().await;
-            if let Some(ref mut stdin) = *stdin {
-                stdin.write_all(json.as_bytes()).await?;
-                stdin.write_all(b"\n").await?;
-                stdin.flush().await?;
-            }
+            let stdin_ref = stdin
+                .as_mut()
+                .ok_or_else(|| McpError::Connection("Server connection closed".into()))?;
+            stdin_ref.write_all(json.as_bytes()).await?;
+            stdin_ref.write_all(b"\n").await?;
+            stdin_ref.flush().await?;
         }
 
         Ok(())
@@ -191,11 +224,27 @@ impl McpClient {
         Ok(serde_json::from_value(result)?)
     }
 
-    /// Shutdown the server connection.
+    /// Shutdown the server connection gracefully.
     pub async fn shutdown(&self) -> Result<(), McpError> {
-        if let Some(mut child) = self.child.lock().await.take() {
-            let _ = child.kill().await;
+        // Close stdin to signal EOF to the server
+        self.stdin.lock().await.take();
+
+        // Abort the reader task
+        if let Some(handle) = self.reader_handle.lock().await.take() {
+            handle.abort();
         }
+
+        // Kill the child process if still running
+        if let Some(mut child) = self.child.lock().await.take() {
+            // Give the process a moment to exit gracefully, then force kill
+            match tokio::time::timeout(Duration::from_millis(500), child.wait()).await {
+                Ok(_) => {}
+                Err(_) => {
+                    let _ = child.kill().await;
+                }
+            }
+        }
+
         Ok(())
     }
 }

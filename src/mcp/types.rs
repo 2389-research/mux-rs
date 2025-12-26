@@ -74,6 +74,7 @@ pub struct McpRpcError {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct McpToolInfo {
     pub name: String,
+    #[serde(default)]
     pub description: String,
     #[serde(rename = "inputSchema")]
     pub input_schema: serde_json::Value,
