@@ -105,4 +105,93 @@ impl McpClient {
     pub fn name(&self) -> &str {
         &self.config.name
     }
+
+    /// Initialize the MCP connection.
+    pub async fn initialize(&self) -> Result<(), McpError> {
+        let params = serde_json::json!({
+            "protocolVersion": "2024-11-05",
+            "capabilities": {},
+            "clientInfo": {
+                "name": "mux-rs",
+                "version": env!("CARGO_PKG_VERSION")
+            }
+        });
+
+        let response = self.request("initialize", Some(params)).await?;
+
+        if let Some(error) = response.error {
+            return Err(McpError::Rpc {
+                code: error.code,
+                message: error.message,
+            });
+        }
+
+        // Send initialized notification (no response expected)
+        let notification = super::McpNotification::new("notifications/initialized", None);
+        let json = serde_json::to_string(&notification)?;
+        {
+            let mut stdin = self.stdin.lock().await;
+            if let Some(ref mut stdin) = *stdin {
+                stdin.write_all(json.as_bytes()).await?;
+                stdin.write_all(b"\n").await?;
+                stdin.flush().await?;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// List available tools from the server.
+    pub async fn list_tools(&self) -> Result<Vec<super::McpToolInfo>, McpError> {
+        let response = self.request("tools/list", None).await?;
+
+        if let Some(error) = response.error {
+            return Err(McpError::Rpc {
+                code: error.code,
+                message: error.message,
+            });
+        }
+
+        let result = response
+            .result
+            .ok_or_else(|| McpError::Protocol("No result in response".into()))?;
+
+        let tools: Vec<super::McpToolInfo> = serde_json::from_value(result["tools"].clone())?;
+        Ok(tools)
+    }
+
+    /// Call a tool on the server.
+    pub async fn call_tool(
+        &self,
+        name: &str,
+        arguments: serde_json::Value,
+    ) -> Result<super::McpToolResult, McpError> {
+        let params = serde_json::json!({
+            "name": name,
+            "arguments": arguments
+        });
+
+        let response = self.request("tools/call", Some(params)).await?;
+
+        if let Some(error) = response.error {
+            return Err(McpError::Rpc {
+                code: error.code,
+                message: error.message,
+            });
+        }
+
+        let result = response
+            .result
+            .ok_or_else(|| McpError::Protocol("No result in response".into()))?;
+
+        Ok(serde_json::from_value(result)?)
+    }
+
+    /// Shutdown the server connection.
+    pub async fn shutdown(&self) -> Result<(), McpError> {
+        if let Some(mut child) = self.child.lock().await.take() {
+            let _ = child.kill().await;
+        }
+        Ok(())
+    }
 }

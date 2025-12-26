@@ -30,6 +30,26 @@ impl McpRequest {
     }
 }
 
+/// A JSON-RPC 2.0 notification (no id, no response expected).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McpNotification {
+    pub jsonrpc: String,
+    pub method: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub params: Option<serde_json::Value>,
+}
+
+impl McpNotification {
+    /// Create a new notification.
+    pub fn new(method: impl Into<String>, params: Option<serde_json::Value>) -> Self {
+        Self {
+            jsonrpc: "2.0".to_string(),
+            method: method.into(),
+            params,
+        }
+    }
+}
+
 /// A JSON-RPC 2.0 response.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct McpResponse {
