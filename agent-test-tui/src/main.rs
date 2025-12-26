@@ -183,6 +183,9 @@ async fn run_agent_loop(registry: &Registry) -> Result<()> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Load .env file if present (ignore if missing)
+    let _ = dotenvy::dotenv();
+
     // Load MCP configs
     let configs = load_config()?;
 
