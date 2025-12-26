@@ -7,7 +7,9 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use super::Tool;
+use crate::error::McpError;
 use crate::llm::ToolDefinition;
+use crate::mcp::{McpClient, McpProxyTool};
 
 /// A thread-safe registry of tools.
 #[derive(Default)]
@@ -75,6 +77,23 @@ impl Registry {
                 input_schema: t.schema(),
             })
             .collect()
+    }
+
+    /// Merge tools from an MCP client into the registry.
+    pub async fn merge_mcp(
+        &self,
+        client: Arc<McpClient>,
+        prefix: Option<&str>,
+    ) -> Result<usize, McpError> {
+        let tools = client.list_tools().await?;
+        let count = tools.len();
+
+        for info in tools {
+            let proxy = McpProxyTool::new(client.clone(), info, prefix);
+            self.register(proxy).await;
+        }
+
+        Ok(count)
     }
 }
 
