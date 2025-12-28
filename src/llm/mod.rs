@@ -3,10 +3,12 @@
 
 mod anthropic;
 mod client;
+mod openai;
 mod types;
 
 pub use anthropic::*;
 pub use client::*;
+pub use openai::*;
 pub use types::*;
 
 #[cfg(test)]
