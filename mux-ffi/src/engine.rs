@@ -4,12 +4,20 @@
 use crate::callback::{ChatCallback, ChatResult};
 use crate::types::*;
 use crate::MuxFfiError;
+use futures::StreamExt;
+use mux::prelude::*;
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::Arc as StdArc;
 use tokio::runtime::Runtime;
+
+/// Stored message for conversation history
+#[derive(Clone)]
+struct StoredMessage {
+    role: Role,
+    content: String,
+}
 
 #[derive(uniffi::Object)]
 pub struct BuddyEngine {
@@ -17,6 +25,8 @@ pub struct BuddyEngine {
     data_dir: PathBuf,
     workspaces: Arc<RwLock<HashMap<String, Workspace>>>,
     conversations: Arc<RwLock<HashMap<String, Vec<Conversation>>>>,
+    /// Conversation history for LLM context
+    message_history: Arc<RwLock<HashMap<String, Vec<StoredMessage>>>>,
 }
 
 #[uniffi::export]
@@ -33,6 +43,7 @@ impl BuddyEngine {
             data_dir: path,
             workspaces: Arc::new(RwLock::new(HashMap::new())),
             conversations: Arc::new(RwLock::new(HashMap::new())),
+            message_history: Arc::new(RwLock::new(HashMap::new())),
         }))
     }
 
@@ -87,6 +98,11 @@ impl BuddyEngine {
             .or_insert_with(Vec::new)
             .push(conversation.clone());
 
+        // Initialize empty message history for this conversation
+        self.message_history
+            .write()
+            .insert(conversation.id.clone(), Vec::new());
+
         Ok(conversation)
     }
 
@@ -111,18 +127,22 @@ impl BuddyEngine {
     }
 
     pub fn send_message(
-        &self,
+        self: Arc<Self>,
         conversation_id: String,
         content: String,
         callback: Box<dyn ChatCallback>,
     ) {
-        let callback = StdArc::new(callback);
+        let engine = self.clone();
+        let callback = Arc::new(callback);
         let cb = callback.clone();
 
         std::thread::spawn(move || {
             let rt = Runtime::new().unwrap();
-            rt.block_on(async {
-                match Self::do_send_message(conversation_id.clone(), content).await {
+            rt.block_on(async move {
+                match engine
+                    .do_send_message(conversation_id.clone(), content, cb.clone())
+                    .await
+                {
                     Ok(result) => cb.on_complete(result),
                     Err(e) => cb.on_error(e),
                 }
@@ -133,16 +153,117 @@ impl BuddyEngine {
 
 impl BuddyEngine {
     async fn do_send_message(
+        &self,
         conversation_id: String,
         content: String,
+        callback: Arc<Box<dyn ChatCallback>>,
     ) -> Result<ChatResult, String> {
-        // Stub implementation that echoes back - real LLM client integration comes later
+        // Add user message to history
+        {
+            let mut history = self.message_history.write();
+            let messages = history
+                .entry(conversation_id.clone())
+                .or_insert_with(Vec::new);
+            messages.push(StoredMessage {
+                role: Role::User,
+                content: content.clone(),
+            });
+        }
+
+        // Try to create Anthropic client
+        let client = match AnthropicClient::from_env() {
+            Ok(c) => c,
+            Err(_) => {
+                // Fallback to echo if no API key
+                let echo_text = format!("(No API key set) Echo: {}", content);
+                callback.on_text_delta(echo_text.clone());
+
+                // Store assistant response
+                {
+                    let mut history = self.message_history.write();
+                    if let Some(messages) = history.get_mut(&conversation_id) {
+                        messages.push(StoredMessage {
+                            role: Role::Assistant,
+                            content: echo_text.clone(),
+                        });
+                    }
+                }
+
+                return Ok(ChatResult {
+                    conversation_id,
+                    final_text: echo_text,
+                    tool_use_count: 0,
+                    input_tokens: 0,
+                    output_tokens: 0,
+                });
+            }
+        };
+
+        // Build message history for context
+        let messages: Vec<Message> = {
+            let history = self.message_history.read();
+            history
+                .get(&conversation_id)
+                .map(|msgs| {
+                    msgs.iter()
+                        .map(|m| Message {
+                            role: m.role,
+                            content: vec![ContentBlock::text(m.content.clone())],
+                        })
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+
+        // Create request
+        let request = Request::new("claude-sonnet-4-20250514")
+            .messages(messages)
+            .max_tokens(4096);
+
+        // Send and stream response
+        let mut stream = client.create_message_stream(&request);
+
+        let mut full_text = String::new();
+        let mut input_tokens = 0u32;
+        let mut output_tokens = 0u32;
+
+        while let Some(event) = stream.next().await {
+            match event {
+                Ok(StreamEvent::ContentBlockDelta { text, .. }) => {
+                    full_text.push_str(&text);
+                    callback.on_text_delta(text);
+                }
+                Ok(StreamEvent::MessageStart { .. }) => {
+                    // MessageStart doesn't carry usage in the StreamEvent enum
+                }
+                Ok(StreamEvent::MessageDelta { usage, .. }) => {
+                    input_tokens = usage.input_tokens;
+                    output_tokens = usage.output_tokens;
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    return Err(e.to_string());
+                }
+            }
+        }
+
+        // Store assistant response in history
+        {
+            let mut history = self.message_history.write();
+            if let Some(messages) = history.get_mut(&conversation_id) {
+                messages.push(StoredMessage {
+                    role: Role::Assistant,
+                    content: full_text.clone(),
+                });
+            }
+        }
+
         Ok(ChatResult {
             conversation_id,
-            final_text: format!("Echo: {}", content),
+            final_text: full_text,
             tool_use_count: 0,
-            input_tokens: 0,
-            output_tokens: 0,
+            input_tokens,
+            output_tokens,
         })
     }
 }
