@@ -9,6 +9,9 @@ pub use types::*;
 mod engine;
 pub use engine::*;
 
+mod callback;
+pub use callback::*;
+
 #[derive(Debug, thiserror::Error, uniffi::Error)]
 pub enum MuxFfiError {
     #[error("Engine error: {message}")]
