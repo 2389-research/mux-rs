@@ -8,5 +8,6 @@ pub mod mcp;
 pub mod permission;
 pub mod prelude;
 pub mod tool;
+pub mod tools;
 
 pub use error::MuxError;

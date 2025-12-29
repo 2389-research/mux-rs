@@ -227,14 +227,10 @@ name = "code-agent"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "async-trait",
  "dotenvy",
  "futures",
- "glob",
  "mux",
- "regex",
  "rustyline",
- "serde",
  "serde_json",
  "tokio",
 ]
@@ -915,9 +911,11 @@ dependencies = [
  "async-trait",
  "futures",
  "glob",
+ "regex",
  "reqwest",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.17",
  "tokio",
  "tokio-test",

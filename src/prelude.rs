@@ -16,3 +16,4 @@ pub use crate::permission::{
     AlwaysApprove, AlwaysReject, ApprovalContext, ApprovalHandler, Decision, Policy, PolicyBuilder,
 };
 pub use crate::tool::{Registry, Tool, ToolExecute, ToolResult};
+pub use crate::tools::{BashTool, ListFilesTool, ReadFileTool, SearchTool, WriteFileTool};
