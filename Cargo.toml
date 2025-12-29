@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "agent-test-tui", "code-agent"]
+members = [".", "mux-ffi", "agent-test-tui", "code-agent"]
 resolver = "2"
 
 [package]
