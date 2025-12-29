@@ -137,6 +137,23 @@ impl BuddyEngine {
             .map(|convs| convs.iter().map(|c| c.id.clone()).collect())
             .unwrap_or_default();
 
+        // Remove any connected MCP clients for this workspace (fire and forget shutdown)
+        // We remove from the map synchronously to prevent new tool calls,
+        // but shutdown happens in the background to avoid blocking.
+        if let Some(clients) = self.mcp_clients.write().remove(&workspace_id) {
+            std::thread::spawn(move || {
+                let rt = tokio::runtime::Runtime::new().unwrap();
+                rt.block_on(async {
+                    for (name, handle) in clients {
+                        let client = handle.client.lock().await;
+                        if let Err(e) = client.shutdown().await {
+                            eprintln!("Error shutting down MCP server '{}' on workspace delete: {}", name, e);
+                        }
+                    }
+                });
+            });
+        }
+
         self.workspaces.write().remove(&workspace_id);
         self.conversations.write().remove(&workspace_id);
 
@@ -493,7 +510,46 @@ impl BuddyEngine {
         }
     }
 
-    /// Execute a tool call on an MCP server.
+    /// Execute a tool call using pre-captured MCP client references.
+    /// This is immune to race conditions from workspace disconnection during message processing.
+    async fn execute_tool_with_captured_client(
+        captured_clients: &HashMap<String, Arc<TokioMutex<McpClient>>>,
+        server_name: &str,
+        tool_name: &str,
+        arguments: serde_json::Value,
+    ) -> Result<String, String> {
+        let client_arc = captured_clients
+            .get(server_name)
+            .ok_or_else(|| format!("Server '{}' not available", server_name))?;
+
+        let client = client_arc.lock().await;
+        let result = client
+            .call_tool(tool_name, arguments)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        // Convert McpToolResult to string
+        let content_text: String = result
+            .content
+            .iter()
+            .map(|block| match block {
+                McpContentBlock::Text { text } => text.clone(),
+                McpContentBlock::Image { data, mime_type } => {
+                    format!("[Image: {} bytes, type: {}]", data.len(), mime_type)
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        if result.is_error {
+            Err(content_text)
+        } else {
+            Ok(content_text)
+        }
+    }
+
+    /// Execute a tool call on an MCP server (used by external callers).
+    #[allow(dead_code)]
     async fn execute_tool(
         &self,
         workspace_id: &str,
@@ -501,15 +557,21 @@ impl BuddyEngine {
         tool_name: &str,
         arguments: serde_json::Value,
     ) -> Result<String, String> {
-        let clients = self.mcp_clients.read();
-        let workspace_clients = clients
-            .get(workspace_id)
-            .ok_or_else(|| "Workspace not connected".to_string())?;
-        let handle = workspace_clients
-            .get(server_name)
-            .ok_or_else(|| format!("Server '{}' not connected", server_name))?;
+        // Clone the Arc<TokioMutex<McpClient>> and drop the RwLock BEFORE any async operations.
+        // This prevents deadlock: parking_lot::RwLock is NOT async-aware and will block the
+        // executor if held across an await point.
+        let client_arc = {
+            let clients = self.mcp_clients.read();
+            let workspace_clients = clients
+                .get(workspace_id)
+                .ok_or_else(|| "Workspace not connected".to_string())?;
+            let handle = workspace_clients
+                .get(server_name)
+                .ok_or_else(|| format!("Server '{}' not connected", server_name))?;
+            Arc::clone(&handle.client)
+        }; // RwLock dropped here, before any await
 
-        let client = handle.client.lock().await;
+        let client = client_arc.lock().await;
         let result = client
             .call_tool(tool_name, arguments)
             .await
@@ -629,6 +691,26 @@ impl BuddyEngine {
         // Get workspace ID for tool lookup
         let workspace_id = self.get_workspace_for_conversation(&conversation_id);
 
+        // Capture MCP clients for the duration of this message processing.
+        // This prevents race conditions if user switches workspaces mid-execution.
+        // We clone the Arc<TokioMutex<McpClient>> references so they remain valid
+        // even if the workspace is disconnected.
+        let captured_mcp_clients: HashMap<String, Arc<TokioMutex<McpClient>>> = workspace_id
+            .as_ref()
+            .map(|ws_id| {
+                let clients = self.mcp_clients.read();
+                clients
+                    .get(ws_id)
+                    .map(|workspace_clients| {
+                        workspace_clients
+                            .iter()
+                            .map(|(name, handle)| (name.clone(), Arc::clone(&handle.client)))
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            })
+            .unwrap_or_default();
+
         // Get available tools for this workspace
         let tools: Vec<ToolDefinition> = workspace_id
             .as_ref()
@@ -646,7 +728,21 @@ impl BuddyEngine {
         let mut full_text = String::new();
 
         // Agentic loop: keep going while the LLM wants to use tools
+        // Limit iterations to prevent runaway loops from misbehaving LLM/MCP servers
+        const MAX_AGENTIC_ITERATIONS: u32 = 50;
+        let mut iteration_count = 0u32;
+
         loop {
+            iteration_count += 1;
+            if iteration_count > MAX_AGENTIC_ITERATIONS {
+                let warning = format!(
+                    "\n\n[Agentic loop terminated after {} iterations to prevent runaway execution]",
+                    MAX_AGENTIC_ITERATIONS
+                );
+                callback.on_text_delta(warning.clone());
+                full_text.push_str(&warning);
+                break;
+            }
             // Build message history for context
             let messages: Vec<Message> = {
                 let history = self.message_history.read();
@@ -744,25 +840,23 @@ impl BuddyEngine {
                 // For MVP: Auto-approve all tool calls
                 // In future, we could wait for approval via pending_approvals
 
-                // Execute the tool
-                if let Some(ws_id) = &workspace_id {
-                    match self
-                        .execute_tool(ws_id, &server_name, &tool_name, arguments)
-                        .await
-                    {
-                        Ok(result) => {
-                            callback.on_tool_result(tool_use_id.clone(), result.clone());
-                            tool_results.push(ContentBlock::tool_result(&tool_use_id, &result));
-                        }
-                        Err(e) => {
-                            callback.on_tool_result(tool_use_id.clone(), format!("Error: {}", e));
-                            tool_results.push(ContentBlock::tool_error(&tool_use_id, &e));
-                        }
+                // Execute the tool using captured MCP clients (immune to workspace disconnect)
+                match Self::execute_tool_with_captured_client(
+                    &captured_mcp_clients,
+                    &server_name,
+                    &tool_name,
+                    arguments,
+                )
+                .await
+                {
+                    Ok(result) => {
+                        callback.on_tool_result(tool_use_id.clone(), result.clone());
+                        tool_results.push(ContentBlock::tool_result(&tool_use_id, &result));
                     }
-                } else {
-                    let error_msg = "No workspace context for tool execution";
-                    callback.on_tool_result(tool_use_id.clone(), error_msg.to_string());
-                    tool_results.push(ContentBlock::tool_error(&tool_use_id, error_msg));
+                    Err(e) => {
+                        callback.on_tool_result(tool_use_id.clone(), format!("Error: {}", e));
+                        tool_results.push(ContentBlock::tool_error(&tool_use_id, &e));
+                    }
                 }
             }
 
