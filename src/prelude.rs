@@ -1,6 +1,9 @@
 // ABOUTME: Prelude module - convenient imports for common use cases.
 // ABOUTME: Use `use mux::prelude::*;` to get started quickly.
 
+pub use crate::agent::{
+    AgentDefinition, AgentRegistry, FilteredRegistry, SubAgent, SubAgentResult, TaskTool,
+};
 pub use crate::error::{LlmError, McpError, MuxError, PermissionError, ToolError};
 pub use crate::llm::{
     AnthropicClient, ContentBlock, LlmClient, Message, OpenAIClient, Request, Response, Role,

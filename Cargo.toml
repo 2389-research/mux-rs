@@ -20,6 +20,7 @@ reqwest = { version = "0.12", features = ["json", "stream"] }
 futures = "0.3"
 glob = "0.3"
 async-stream = "0.3.6"
+uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
 tokio-test = "0.4"
