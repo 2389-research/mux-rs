@@ -1,12 +1,15 @@
 // ABOUTME: BuddyEngine - the main entry point for the FFI layer.
 // ABOUTME: Manages workspaces, conversations, and bridges to mux core.
 
+use crate::callback::{ChatCallback, ChatResult};
 use crate::types::*;
 use crate::MuxFfiError;
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::Arc as StdArc;
+use tokio::runtime::Runtime;
 
 #[derive(uniffi::Object)]
 pub struct BuddyEngine {
@@ -93,5 +96,53 @@ impl BuddyEngine {
             .get(&workspace_id)
             .cloned()
             .unwrap_or_default()
+    }
+
+    pub fn set_api_key(&self, provider: Provider, key: String) {
+        let provider_key = match provider {
+            Provider::Anthropic => "ANTHROPIC_API_KEY",
+            Provider::OpenAI => "OPENAI_API_KEY",
+        };
+        // SAFETY: We're setting environment variables at initialization time,
+        // before spawning threads that might read them concurrently.
+        unsafe {
+            std::env::set_var(provider_key, key);
+        }
+    }
+
+    pub fn send_message(
+        &self,
+        conversation_id: String,
+        content: String,
+        callback: Box<dyn ChatCallback>,
+    ) {
+        let callback = StdArc::new(callback);
+        let cb = callback.clone();
+
+        std::thread::spawn(move || {
+            let rt = Runtime::new().unwrap();
+            rt.block_on(async {
+                match Self::do_send_message(conversation_id.clone(), content).await {
+                    Ok(result) => cb.on_complete(result),
+                    Err(e) => cb.on_error(e),
+                }
+            });
+        });
+    }
+}
+
+impl BuddyEngine {
+    async fn do_send_message(
+        conversation_id: String,
+        content: String,
+    ) -> Result<ChatResult, String> {
+        // Stub implementation that echoes back - real LLM client integration comes later
+        Ok(ChatResult {
+            conversation_id,
+            final_text: format!("Echo: {}", content),
+            tool_use_count: 0,
+            input_tokens: 0,
+            output_tokens: 0,
+        })
     }
 }
