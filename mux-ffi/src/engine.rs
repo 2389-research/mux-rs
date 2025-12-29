@@ -33,7 +33,11 @@ pub struct BuddyEngine {
     conversations: Arc<RwLock<HashMap<String, Vec<Conversation>>>>,
     /// Conversation history for LLM context
     message_history: Arc<RwLock<HashMap<String, Vec<StoredMessage>>>>,
-    /// Thread-safe API key storage (avoids unsafe env::set_var)
+    /// Thread-safe API key storage (avoids unsafe env::set_var).
+    /// NOTE: Keys are stored in-memory only for security. The Swift app should
+    /// persist keys securely (e.g., Keychain) and call set_api_key on each launch.
+    /// NOTE: Currently only Anthropic provider is supported for chat. OpenAI support
+    /// is planned but not yet implemented.
     api_keys: Arc<RwLock<HashMap<Provider, String>>>,
 }
 
