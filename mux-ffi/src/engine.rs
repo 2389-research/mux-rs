@@ -2,10 +2,10 @@
 // ABOUTME: Manages workspaces, conversations, and bridges to mux core.
 
 use crate::callback::{ChatCallback, ChatResult};
-use crate::types::*;
+use crate::types::{Conversation, McpServerConfig, Provider, Workspace, WorkspaceSummary};
 use crate::MuxFfiError;
 use futures::StreamExt;
-use mux::prelude::*;
+use mux::prelude::{AnthropicClient, ContentBlock, LlmClient, Message, Request, Role, StreamEvent};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -199,6 +199,95 @@ impl BuddyEngine {
                 }
             });
         });
+    }
+
+    pub fn add_mcp_server(
+        &self,
+        workspace_id: String,
+        config: McpServerConfig,
+    ) -> Result<(), MuxFfiError> {
+        let mut workspaces = self.workspaces.write();
+        let workspace = workspaces.get_mut(&workspace_id).ok_or_else(|| {
+            MuxFfiError::Engine {
+                message: format!("Workspace not found: {}", workspace_id),
+            }
+        })?;
+
+        // Check if server with same name already exists
+        if workspace.mcp_servers.iter().any(|s| s.name == config.name) {
+            return Err(MuxFfiError::Engine {
+                message: format!("MCP server '{}' already exists in workspace", config.name),
+            });
+        }
+
+        workspace.mcp_servers.push(config);
+        drop(workspaces);
+
+        self.save_workspaces();
+        Ok(())
+    }
+
+    pub fn remove_mcp_server(
+        &self,
+        workspace_id: String,
+        server_name: String,
+    ) -> Result<(), MuxFfiError> {
+        let mut workspaces = self.workspaces.write();
+        let workspace = workspaces.get_mut(&workspace_id).ok_or_else(|| {
+            MuxFfiError::Engine {
+                message: format!("Workspace not found: {}", workspace_id),
+            }
+        })?;
+
+        let original_len = workspace.mcp_servers.len();
+        workspace.mcp_servers.retain(|s| s.name != server_name);
+
+        if workspace.mcp_servers.len() == original_len {
+            return Err(MuxFfiError::Engine {
+                message: format!("MCP server '{}' not found in workspace", server_name),
+            });
+        }
+
+        drop(workspaces);
+
+        self.save_workspaces();
+        Ok(())
+    }
+
+    pub fn list_mcp_servers(&self, workspace_id: String) -> Vec<McpServerConfig> {
+        self.workspaces
+            .read()
+            .get(&workspace_id)
+            .map(|ws| ws.mcp_servers.clone())
+            .unwrap_or_default()
+    }
+
+    pub fn update_mcp_server(
+        &self,
+        workspace_id: String,
+        config: McpServerConfig,
+    ) -> Result<(), MuxFfiError> {
+        let mut workspaces = self.workspaces.write();
+        let workspace = workspaces.get_mut(&workspace_id).ok_or_else(|| {
+            MuxFfiError::Engine {
+                message: format!("Workspace not found: {}", workspace_id),
+            }
+        })?;
+
+        // Find and update the server
+        let server = workspace
+            .mcp_servers
+            .iter_mut()
+            .find(|s| s.name == config.name)
+            .ok_or_else(|| MuxFfiError::Engine {
+                message: format!("MCP server '{}' not found in workspace", config.name),
+            })?;
+
+        *server = config;
+        drop(workspaces);
+
+        self.save_workspaces();
+        Ok(())
     }
 }
 

@@ -41,6 +41,7 @@ pub struct Workspace {
     pub name: String,
     pub path: Option<String>,
     pub llm_config: Option<LlmConfig>,
+    pub mcp_servers: Vec<McpServerConfig>,
 }
 
 impl Workspace {
@@ -50,6 +51,7 @@ impl Workspace {
             name,
             path,
             llm_config: None,
+            mcp_servers: Vec::new(),
         }
     }
 }
@@ -84,12 +86,44 @@ impl Conversation {
     }
 }
 
-#[derive(Debug, Clone, uniffi::Record)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, uniffi::Enum)]
+pub enum McpTransportType {
+    Stdio,
+    Sse,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, uniffi::Record)]
 pub struct McpServerConfig {
     pub name: String,
-    pub command: String,
+    pub transport_type: McpTransportType,
+    pub command: Option<String>,
     pub args: Vec<String>,
+    pub url: Option<String>,
     pub enabled: bool,
+}
+
+impl McpServerConfig {
+    pub fn stdio(name: String, command: String, args: Vec<String>) -> Self {
+        Self {
+            name,
+            transport_type: McpTransportType::Stdio,
+            command: Some(command),
+            args,
+            url: None,
+            enabled: true,
+        }
+    }
+
+    pub fn sse(name: String, url: String) -> Self {
+        Self {
+            name,
+            transport_type: McpTransportType::Sse,
+            command: None,
+            args: Vec::new(),
+            url: Some(url),
+            enabled: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, uniffi::Record)]
