@@ -1,0 +1,7 @@
+# ABOUTME: UniFFI configuration for Swift binding generation.
+# ABOUTME: Configures module names and Swift-specific options.
+
+[bindings.swift]
+module_name = "MuxFFI"
+ffi_module_name = "MuxFFIFFI"
+generate_immutable_records = true
