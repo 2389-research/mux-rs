@@ -10,10 +10,11 @@ pub use crate::llm::{
     StopReason, StreamEvent, ToolDefinition, Usage,
 };
 pub use crate::mcp::{
-    McpClient, McpLogLevel, McpPromptGetResult, McpPromptInfo, McpPromptsListResult, McpProxyTool,
-    McpResourceContent, McpResourceInfo, McpResourcesListResult, McpRoot, McpSamplingParams,
-    McpSamplingResult, McpServerCapabilities, McpServerConfig, McpToolInfo, McpToolResult,
-    McpTransport, SseTransport, StdioTransport, Transport,
+    McpClient, McpContentBlock, McpLogLevel, McpPromptGetResult, McpPromptInfo,
+    McpPromptsListResult, McpProxyTool, McpResourceContent, McpResourceInfo,
+    McpResourcesListResult, McpRoot, McpSamplingParams, McpSamplingResult, McpServerCapabilities,
+    McpServerConfig, McpToolInfo, McpToolResult, McpTransport, SseTransport, StdioTransport,
+    Transport,
 };
 pub use crate::permission::{
     AlwaysApprove, AlwaysReject, ApprovalContext, ApprovalHandler, Decision, Policy, PolicyBuilder,

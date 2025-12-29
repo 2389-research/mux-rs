@@ -1,11 +1,17 @@
 // ABOUTME: BuddyEngine - the main entry point for the FFI layer.
 // ABOUTME: Manages workspaces, conversations, and bridges to mux core.
 
-use crate::callback::{ChatCallback, ChatResult};
-use crate::types::{Conversation, McpServerConfig, Provider, Workspace, WorkspaceSummary};
+use crate::callback::{ChatCallback, ChatResult, ToolUseRequest};
+use crate::types::{
+    ApprovalDecision, Conversation, McpServerConfig, McpTransportType, Provider, Workspace,
+    WorkspaceSummary,
+};
 use crate::MuxFfiError;
-use futures::StreamExt;
-use mux::prelude::{AnthropicClient, ContentBlock, LlmClient, Message, Request, Role, StreamEvent};
+use mux::prelude::{
+    AnthropicClient, ContentBlock, LlmClient, McpClient, McpContentBlock,
+    McpServerConfig as MuxMcpServerConfig, McpToolInfo, McpTransport, Message, Request, Role,
+    StopReason, ToolDefinition,
+};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -13,6 +19,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::runtime::Runtime;
+use tokio::sync::Mutex as TokioMutex;
 
 /// Stored message for conversation history
 #[derive(Clone, Serialize, Deserialize)]
@@ -25,6 +32,13 @@ struct StoredMessage {
 const WORKSPACES_FILE: &str = "workspaces.json";
 const CONVERSATIONS_FILE: &str = "conversations.json";
 const MESSAGES_DIR: &str = "messages";
+
+/// Holds a connected MCP client and its available tools.
+struct McpClientHandle {
+    client: Arc<TokioMutex<McpClient>>,
+    tools: Vec<McpToolInfo>,
+    server_name: String,
+}
 
 #[derive(uniffi::Object)]
 pub struct BuddyEngine {
@@ -39,6 +53,11 @@ pub struct BuddyEngine {
     /// NOTE: Currently only Anthropic provider is supported for chat. OpenAI support
     /// is planned but not yet implemented.
     api_keys: Arc<RwLock<HashMap<Provider, String>>>,
+    /// Connected MCP clients, keyed by workspace_id -> server_name -> handle
+    mcp_clients: Arc<RwLock<HashMap<String, HashMap<String, McpClientHandle>>>>,
+    /// Pending tool approval requests, keyed by tool_use_id -> oneshot sender
+    pending_approvals:
+        Arc<RwLock<HashMap<String, tokio::sync::oneshot::Sender<ApprovalDecision>>>>,
 }
 
 #[uniffi::export]
@@ -68,6 +87,8 @@ impl BuddyEngine {
             conversations: Arc::new(RwLock::new(conversations)),
             message_history: Arc::new(RwLock::new(message_history)),
             api_keys: Arc::new(RwLock::new(HashMap::new())),
+            mcp_clients: Arc::new(RwLock::new(HashMap::new())),
+            pending_approvals: Arc::new(RwLock::new(HashMap::new())),
         }))
     }
 
@@ -294,6 +315,225 @@ impl BuddyEngine {
         self.save_workspaces();
         Ok(())
     }
+
+    /// Connect to all enabled MCP servers for a workspace.
+    /// This should be called when entering a workspace to establish connections.
+    pub fn connect_workspace_servers(self: Arc<Self>, workspace_id: String) {
+        let engine = self.clone();
+        std::thread::spawn(move || {
+            let rt = Runtime::new().unwrap();
+            rt.block_on(async move {
+                if let Err(e) = engine.do_connect_workspace_servers(workspace_id).await {
+                    eprintln!("Failed to connect workspace servers: {}", e);
+                }
+            });
+        });
+    }
+
+    /// Respond to a tool approval request.
+    /// This is called by Swift when the user approves/denies a tool use.
+    pub fn respond_to_tool_approval(&self, tool_use_id: String, decision: ApprovalDecision) {
+        let mut pending = self.pending_approvals.write();
+        if let Some(sender) = pending.remove(&tool_use_id) {
+            let _ = sender.send(decision);
+        }
+    }
+
+    /// Disconnect all MCP servers for a workspace.
+    /// This should be called when leaving a workspace.
+    pub fn disconnect_workspace_servers(self: Arc<Self>, workspace_id: String) {
+        let engine = self.clone();
+        std::thread::spawn(move || {
+            let rt = Runtime::new().unwrap();
+            rt.block_on(async move {
+                engine.do_disconnect_workspace_servers(&workspace_id).await;
+            });
+        });
+    }
+}
+
+/// MCP client management methods
+impl BuddyEngine {
+    /// Connect to all enabled MCP servers for a workspace.
+    async fn do_connect_workspace_servers(&self, workspace_id: String) -> Result<(), String> {
+        // Get enabled MCP server configs for this workspace
+        let server_configs: Vec<McpServerConfig> = {
+            let workspaces = self.workspaces.read();
+            let workspace = workspaces
+                .get(&workspace_id)
+                .ok_or_else(|| format!("Workspace not found: {}", workspace_id))?;
+            workspace
+                .mcp_servers
+                .iter()
+                .filter(|s| s.enabled)
+                .cloned()
+                .collect()
+        };
+
+        if server_configs.is_empty() {
+            return Ok(());
+        }
+
+        let mut workspace_clients: HashMap<String, McpClientHandle> = HashMap::new();
+
+        for config in server_configs {
+            match self.connect_single_server(&config).await {
+                Ok(handle) => {
+                    eprintln!(
+                        "Connected to MCP server '{}' with {} tools",
+                        config.name,
+                        handle.tools.len()
+                    );
+                    workspace_clients.insert(config.name.clone(), handle);
+                }
+                Err(e) => {
+                    eprintln!("Failed to connect to MCP server '{}': {}", config.name, e);
+                }
+            }
+        }
+
+        // Store the connected clients
+        self.mcp_clients
+            .write()
+            .insert(workspace_id, workspace_clients);
+
+        Ok(())
+    }
+
+    /// Connect to a single MCP server.
+    async fn connect_single_server(
+        &self,
+        config: &McpServerConfig,
+    ) -> Result<McpClientHandle, String> {
+        // Convert FFI config to mux config
+        let transport = match config.transport_type {
+            McpTransportType::Stdio => {
+                let command = config
+                    .command
+                    .as_ref()
+                    .ok_or_else(|| "Stdio transport requires command".to_string())?;
+                McpTransport::Stdio {
+                    command: command.clone(),
+                    args: config.args.clone(),
+                    env: HashMap::new(),
+                }
+            }
+            McpTransportType::Sse => {
+                let url = config
+                    .url
+                    .as_ref()
+                    .ok_or_else(|| "SSE transport requires URL".to_string())?;
+                McpTransport::Sse { url: url.clone() }
+            }
+        };
+
+        let mux_config = MuxMcpServerConfig {
+            name: config.name.clone(),
+            transport,
+        };
+
+        // Connect and initialize
+        let mut client = McpClient::connect(mux_config)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        client.initialize().await.map_err(|e| e.to_string())?;
+
+        // Fetch available tools
+        let tools = client.list_tools().await.map_err(|e| e.to_string())?;
+
+        Ok(McpClientHandle {
+            client: Arc::new(TokioMutex::new(client)),
+            tools,
+            server_name: config.name.clone(),
+        })
+    }
+
+    /// Disconnect all MCP servers for a workspace.
+    async fn do_disconnect_workspace_servers(&self, workspace_id: &str) {
+        let clients = self.mcp_clients.write().remove(workspace_id);
+
+        if let Some(clients) = clients {
+            for (name, handle) in clients {
+                let client = handle.client.lock().await;
+                if let Err(e) = client.shutdown().await {
+                    eprintln!("Error shutting down MCP server '{}': {}", name, e);
+                }
+            }
+        }
+    }
+
+    /// Get all tools available for a workspace as ToolDefinitions for the LLM.
+    fn get_workspace_tools(&self, workspace_id: &str) -> Vec<ToolDefinition> {
+        let clients = self.mcp_clients.read();
+        let workspace_clients = match clients.get(workspace_id) {
+            Some(c) => c,
+            None => return Vec::new(),
+        };
+
+        workspace_clients
+            .values()
+            .flat_map(|handle| {
+                handle.tools.iter().map(|tool| ToolDefinition {
+                    name: format!("{}:{}", handle.server_name, tool.name),
+                    description: tool.description.clone(),
+                    input_schema: tool.input_schema.clone(),
+                })
+            })
+            .collect()
+    }
+
+    /// Find the MCP client and tool name for a qualified tool name (server:tool).
+    fn parse_tool_name(&self, qualified_name: &str) -> Option<(String, String)> {
+        let parts: Vec<&str> = qualified_name.splitn(2, ':').collect();
+        if parts.len() == 2 {
+            Some((parts[0].to_string(), parts[1].to_string()))
+        } else {
+            None
+        }
+    }
+
+    /// Execute a tool call on an MCP server.
+    async fn execute_tool(
+        &self,
+        workspace_id: &str,
+        server_name: &str,
+        tool_name: &str,
+        arguments: serde_json::Value,
+    ) -> Result<String, String> {
+        let clients = self.mcp_clients.read();
+        let workspace_clients = clients
+            .get(workspace_id)
+            .ok_or_else(|| "Workspace not connected".to_string())?;
+        let handle = workspace_clients
+            .get(server_name)
+            .ok_or_else(|| format!("Server '{}' not connected", server_name))?;
+
+        let client = handle.client.lock().await;
+        let result = client
+            .call_tool(tool_name, arguments)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        // Convert McpToolResult to string
+        let content_text: String = result
+            .content
+            .iter()
+            .map(|block| match block {
+                McpContentBlock::Text { text } => text.clone(),
+                McpContentBlock::Image { data, mime_type } => {
+                    format!("[Image: {} bytes, type: {}]", data.len(), mime_type)
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        if result.is_error {
+            Err(content_text)
+        } else {
+            Ok(content_text)
+        }
+    }
 }
 
 impl BuddyEngine {
@@ -316,6 +556,18 @@ impl BuddyEngine {
         let workspaces = self.workspaces.read();
         let workspace = workspaces.get(&workspace_id)?;
         workspace.llm_config.as_ref().map(|cfg| cfg.model.clone())
+    }
+
+    /// Get the workspace ID for a conversation.
+    fn get_workspace_for_conversation(&self, conversation_id: &str) -> Option<String> {
+        let conversations = self.conversations.read();
+        conversations.iter().find_map(|(ws_id, convs)| {
+            if convs.iter().any(|c| c.id == conversation_id) {
+                Some(ws_id.clone())
+            } else {
+                None
+            }
+        })
     }
 
     async fn do_send_message(
@@ -374,78 +626,192 @@ impl BuddyEngine {
         // Create client with stored API key
         let client = AnthropicClient::new(&api_key);
 
-        // Build message history for context
-        let messages: Vec<Message> = {
-            let history = self.message_history.read();
-            history
-                .get(&conversation_id)
-                .map(|msgs| {
-                    msgs.iter()
-                        .map(|m| Message {
-                            role: m.role,
-                            content: vec![ContentBlock::text(m.content.clone())],
-                        })
-                        .collect()
-                })
-                .unwrap_or_default()
-        };
+        // Get workspace ID for tool lookup
+        let workspace_id = self.get_workspace_for_conversation(&conversation_id);
+
+        // Get available tools for this workspace
+        let tools: Vec<ToolDefinition> = workspace_id
+            .as_ref()
+            .map(|ws_id| self.get_workspace_tools(ws_id))
+            .unwrap_or_default();
 
         // Get model from workspace config, falling back to default
-        let model = self.get_model_for_conversation(&conversation_id)
+        let model = self
+            .get_model_for_conversation(&conversation_id)
             .unwrap_or_else(|| "claude-sonnet-4-20250514".to_string());
 
-        // Create request
-        let request = Request::new(&model)
-            .messages(messages)
-            .max_tokens(4096);
-
-        // Send and stream response
-        let mut stream = client.create_message_stream(&request);
-
+        let mut total_tool_use_count = 0u32;
+        let mut total_input_tokens = 0u32;
+        let mut total_output_tokens = 0u32;
         let mut full_text = String::new();
-        let mut input_tokens = 0u32;
-        let mut output_tokens = 0u32;
 
-        while let Some(event) = stream.next().await {
-            match event {
-                Ok(StreamEvent::ContentBlockDelta { text, .. }) => {
-                    full_text.push_str(&text);
-                    callback.on_text_delta(text);
-                }
-                Ok(StreamEvent::MessageStart { .. }) => {
-                    // MessageStart doesn't carry usage in the StreamEvent enum
-                }
-                Ok(StreamEvent::MessageDelta { usage, .. }) => {
-                    input_tokens = usage.input_tokens;
-                    output_tokens = usage.output_tokens;
-                }
-                Ok(_) => {}
-                Err(e) => {
-                    return Err(e.to_string());
+        // Agentic loop: keep going while the LLM wants to use tools
+        loop {
+            // Build message history for context
+            let messages: Vec<Message> = {
+                let history = self.message_history.read();
+                history
+                    .get(&conversation_id)
+                    .map(|msgs| {
+                        msgs.iter()
+                            .map(|m| Message {
+                                role: m.role,
+                                content: vec![ContentBlock::text(m.content.clone())],
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            };
+
+            // Create request with tools
+            let mut request = Request::new(&model).messages(messages).max_tokens(4096);
+
+            if !tools.is_empty() {
+                request = request.tools(tools.clone());
+            }
+
+            // Use non-streaming for tool use to get complete response
+            let response = client
+                .create_message(&request)
+                .await
+                .map_err(|e| e.to_string())?;
+
+            total_input_tokens += response.usage.input_tokens;
+            total_output_tokens += response.usage.output_tokens;
+
+            // Process the response content
+            let mut tool_uses: Vec<(String, String, String, serde_json::Value)> = Vec::new();
+            let mut response_text = String::new();
+
+            for block in &response.content {
+                match block {
+                    ContentBlock::Text { text } => {
+                        response_text.push_str(text);
+                        callback.on_text_delta(text.clone());
+                    }
+                    ContentBlock::ToolUse { id, name, input } => {
+                        tool_uses.push((id.clone(), name.clone(), name.clone(), input.clone()));
+                    }
+                    ContentBlock::ToolResult { .. } => {
+                        // Should not appear in assistant response
+                    }
                 }
             }
-        }
 
-        // Store assistant response in history
-        {
-            let mut history = self.message_history.write();
-            if let Some(messages) = history.get_mut(&conversation_id) {
-                messages.push(StoredMessage {
-                    role: Role::Assistant,
-                    content: full_text.clone(),
+            full_text.push_str(&response_text);
+
+            // If no tool uses, we're done
+            if tool_uses.is_empty() || response.stop_reason != StopReason::ToolUse {
+                // Store final assistant response
+                if !response_text.is_empty() {
+                    let mut history = self.message_history.write();
+                    if let Some(messages) = history.get_mut(&conversation_id) {
+                        messages.push(StoredMessage {
+                            role: Role::Assistant,
+                            content: response_text,
+                        });
+                    }
+                }
+                self.save_messages(&conversation_id);
+                break;
+            }
+
+            // Process tool uses
+            let mut tool_results: Vec<ContentBlock> = Vec::new();
+
+            for (tool_use_id, qualified_name, _display_name, arguments) in tool_uses {
+                total_tool_use_count += 1;
+
+                // Parse server:tool format
+                let (server_name, tool_name) = match self.parse_tool_name(&qualified_name) {
+                    Some((s, t)) => (s, t),
+                    None => {
+                        let error_msg = format!("Invalid tool name format: {}", qualified_name);
+                        tool_results.push(ContentBlock::tool_error(&tool_use_id, &error_msg));
+                        callback.on_tool_result(tool_use_id.clone(), error_msg);
+                        continue;
+                    }
+                };
+
+                // Notify callback about tool use
+                callback.on_tool_use(ToolUseRequest {
+                    id: tool_use_id.clone(),
+                    tool_name: tool_name.clone(),
+                    server_name: server_name.clone(),
+                    arguments: serde_json::to_string(&arguments).unwrap_or_default(),
                 });
-            }
-        }
 
-        // Persist to disk
-        self.save_messages(&conversation_id);
+                // For MVP: Auto-approve all tool calls
+                // In future, we could wait for approval via pending_approvals
+
+                // Execute the tool
+                if let Some(ws_id) = &workspace_id {
+                    match self
+                        .execute_tool(ws_id, &server_name, &tool_name, arguments)
+                        .await
+                    {
+                        Ok(result) => {
+                            callback.on_tool_result(tool_use_id.clone(), result.clone());
+                            tool_results.push(ContentBlock::tool_result(&tool_use_id, &result));
+                        }
+                        Err(e) => {
+                            callback.on_tool_result(tool_use_id.clone(), format!("Error: {}", e));
+                            tool_results.push(ContentBlock::tool_error(&tool_use_id, &e));
+                        }
+                    }
+                } else {
+                    let error_msg = "No workspace context for tool execution";
+                    callback.on_tool_result(tool_use_id.clone(), error_msg.to_string());
+                    tool_results.push(ContentBlock::tool_error(&tool_use_id, error_msg));
+                }
+            }
+
+            // Store assistant response with tool uses in history as text representation
+            {
+                let mut history = self.message_history.write();
+                if let Some(messages) = history.get_mut(&conversation_id) {
+                    // Store assistant message
+                    if !response_text.is_empty() {
+                        messages.push(StoredMessage {
+                            role: Role::Assistant,
+                            content: response_text,
+                        });
+                    }
+                    // Store tool results as user message
+                    let tool_results_text: String = tool_results
+                        .iter()
+                        .filter_map(|block| match block {
+                            ContentBlock::ToolResult {
+                                tool_use_id,
+                                content,
+                                is_error,
+                            } => Some(format!(
+                                "[Tool Result {}{}]: {}",
+                                tool_use_id,
+                                if *is_error { " (error)" } else { "" },
+                                content
+                            )),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    if !tool_results_text.is_empty() {
+                        messages.push(StoredMessage {
+                            role: Role::User,
+                            content: tool_results_text,
+                        });
+                    }
+                }
+            }
+            self.save_messages(&conversation_id);
+        }
 
         Ok(ChatResult {
             conversation_id,
             final_text: full_text,
-            tool_use_count: 0,
-            input_tokens,
-            output_tokens,
+            tool_use_count: total_tool_use_count,
+            input_tokens: total_input_tokens,
+            output_tokens: total_output_tokens,
         })
     }
 }
