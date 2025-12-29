@@ -33,6 +33,8 @@ pub struct BuddyEngine {
     conversations: Arc<RwLock<HashMap<String, Vec<Conversation>>>>,
     /// Conversation history for LLM context
     message_history: Arc<RwLock<HashMap<String, Vec<StoredMessage>>>>,
+    /// Thread-safe API key storage (avoids unsafe env::set_var)
+    api_keys: Arc<RwLock<HashMap<Provider, String>>>,
 }
 
 #[uniffi::export]
@@ -61,6 +63,7 @@ impl BuddyEngine {
             workspaces: Arc::new(RwLock::new(workspaces)),
             conversations: Arc::new(RwLock::new(conversations)),
             message_history: Arc::new(RwLock::new(message_history)),
+            api_keys: Arc::new(RwLock::new(HashMap::new())),
         }))
     }
 
@@ -166,15 +169,13 @@ impl BuddyEngine {
     }
 
     pub fn set_api_key(&self, provider: Provider, key: String) {
-        let provider_key = match provider {
-            Provider::Anthropic => "ANTHROPIC_API_KEY",
-            Provider::OpenAI => "OPENAI_API_KEY",
-        };
-        // SAFETY: We're setting environment variables at initialization time,
-        // before spawning threads that might read them concurrently.
-        unsafe {
-            std::env::set_var(provider_key, key);
-        }
+        // Store API key in thread-safe storage
+        self.api_keys.write().insert(provider, key);
+    }
+
+    /// Get stored API key for a provider
+    pub fn get_api_key(&self, provider: Provider) -> Option<String> {
+        self.api_keys.read().get(&provider).cloned()
     }
 
     pub fn send_message(
@@ -292,6 +293,27 @@ impl BuddyEngine {
 }
 
 impl BuddyEngine {
+    /// Get the configured model for a conversation's workspace
+    fn get_model_for_conversation(&self, conversation_id: &str) -> Option<String> {
+        // Find workspace for this conversation
+        let conversations = self.conversations.read();
+        let workspace_id = conversations
+            .iter()
+            .find_map(|(ws_id, convs)| {
+                if convs.iter().any(|c| c.id == conversation_id) {
+                    Some(ws_id.clone())
+                } else {
+                    None
+                }
+            })?;
+        drop(conversations);
+
+        // Get workspace's LLM config
+        let workspaces = self.workspaces.read();
+        let workspace = workspaces.get(&workspace_id)?;
+        workspace.llm_config.as_ref().map(|cfg| cfg.model.clone())
+    }
+
     async fn do_send_message(
         &self,
         conversation_id: String,
@@ -313,10 +335,10 @@ impl BuddyEngine {
         // Persist user message to disk
         self.save_messages(&conversation_id);
 
-        // Try to create Anthropic client
-        let client = match AnthropicClient::from_env() {
-            Ok(c) => c,
-            Err(_) => {
+        // Get API key from thread-safe storage
+        let api_key = match self.api_keys.read().get(&Provider::Anthropic).cloned() {
+            Some(key) if !key.is_empty() => key,
+            _ => {
                 // Fallback to echo if no API key
                 let echo_text = format!("(No API key set) Echo: {}", content);
                 callback.on_text_delta(echo_text.clone());
@@ -345,6 +367,9 @@ impl BuddyEngine {
             }
         };
 
+        // Create client with stored API key
+        let client = AnthropicClient::new(&api_key);
+
         // Build message history for context
         let messages: Vec<Message> = {
             let history = self.message_history.read();
@@ -361,8 +386,12 @@ impl BuddyEngine {
                 .unwrap_or_default()
         };
 
+        // Get model from workspace config, falling back to default
+        let model = self.get_model_for_conversation(&conversation_id)
+            .unwrap_or_else(|| "claude-sonnet-4-20250514".to_string());
+
         // Create request
-        let request = Request::new("claude-sonnet-4-20250514")
+        let request = Request::new(&model)
             .messages(messages)
             .max_tokens(4096);
 
