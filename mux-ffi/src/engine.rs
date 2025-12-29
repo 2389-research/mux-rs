@@ -7,21 +7,27 @@ use crate::MuxFfiError;
 use futures::StreamExt;
 use mux::prelude::*;
 use parking_lot::RwLock;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::runtime::Runtime;
 
 /// Stored message for conversation history
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 struct StoredMessage {
     role: Role,
     content: String,
 }
 
+/// File names for persistence
+const WORKSPACES_FILE: &str = "workspaces.json";
+const CONVERSATIONS_FILE: &str = "conversations.json";
+const MESSAGES_DIR: &str = "messages";
+
 #[derive(uniffi::Object)]
 pub struct BuddyEngine {
-    #[allow(dead_code)]
     data_dir: PathBuf,
     workspaces: Arc<RwLock<HashMap<String, Workspace>>>,
     conversations: Arc<RwLock<HashMap<String, Vec<Conversation>>>>,
@@ -35,15 +41,26 @@ impl BuddyEngine {
     pub fn new(data_dir: String) -> Result<Arc<Self>, MuxFfiError> {
         let path = PathBuf::from(&data_dir);
 
-        std::fs::create_dir_all(&path).map_err(|e| MuxFfiError::Engine {
+        fs::create_dir_all(&path).map_err(|e| MuxFfiError::Engine {
             message: format!("Failed to create data directory: {}", e),
         })?;
 
+        // Create messages directory if it doesn't exist
+        let messages_dir = path.join(MESSAGES_DIR);
+        fs::create_dir_all(&messages_dir).map_err(|e| MuxFfiError::Engine {
+            message: format!("Failed to create messages directory: {}", e),
+        })?;
+
+        // Load existing data from disk
+        let workspaces = Self::load_workspaces(&path);
+        let conversations = Self::load_conversations(&path);
+        let message_history = Self::load_all_messages(&path, &conversations);
+
         Ok(Arc::new(Self {
             data_dir: path,
-            workspaces: Arc::new(RwLock::new(HashMap::new())),
-            conversations: Arc::new(RwLock::new(HashMap::new())),
-            message_history: Arc::new(RwLock::new(HashMap::new())),
+            workspaces: Arc::new(RwLock::new(workspaces)),
+            conversations: Arc::new(RwLock::new(conversations)),
+            message_history: Arc::new(RwLock::new(message_history)),
         }))
     }
 
@@ -57,6 +74,10 @@ impl BuddyEngine {
 
         self.workspaces.write().insert(id.clone(), workspace.clone());
         self.conversations.write().insert(id, Vec::new());
+
+        // Persist to disk
+        self.save_workspaces();
+        self.save_conversations();
 
         Ok(workspace)
     }
@@ -80,8 +101,34 @@ impl BuddyEngine {
     }
 
     pub fn delete_workspace(&self, workspace_id: String) -> Result<(), MuxFfiError> {
+        // Get conversation IDs before removing them (for message cleanup)
+        let conversation_ids: Vec<String> = self
+            .conversations
+            .read()
+            .get(&workspace_id)
+            .map(|convs| convs.iter().map(|c| c.id.clone()).collect())
+            .unwrap_or_default();
+
         self.workspaces.write().remove(&workspace_id);
         self.conversations.write().remove(&workspace_id);
+
+        // Remove message history for all conversations in this workspace
+        {
+            let mut history = self.message_history.write();
+            for conv_id in &conversation_ids {
+                history.remove(conv_id);
+            }
+        }
+
+        // Persist to disk
+        self.save_workspaces();
+        self.save_conversations();
+
+        // Delete message files for conversations in this workspace
+        for conv_id in conversation_ids {
+            self.delete_message_file(&conv_id);
+        }
+
         Ok(())
     }
 
@@ -102,6 +149,10 @@ impl BuddyEngine {
         self.message_history
             .write()
             .insert(conversation.id.clone(), Vec::new());
+
+        // Persist to disk
+        drop(conversations); // Release lock before saving
+        self.save_conversations();
 
         Ok(conversation)
     }
@@ -170,6 +221,9 @@ impl BuddyEngine {
             });
         }
 
+        // Persist user message to disk
+        self.save_messages(&conversation_id);
+
         // Try to create Anthropic client
         let client = match AnthropicClient::from_env() {
             Ok(c) => c,
@@ -188,6 +242,9 @@ impl BuddyEngine {
                         });
                     }
                 }
+
+                // Persist to disk
+                self.save_messages(&conversation_id);
 
                 return Ok(ChatResult {
                     conversation_id,
@@ -258,6 +315,9 @@ impl BuddyEngine {
             }
         }
 
+        // Persist to disk
+        self.save_messages(&conversation_id);
+
         Ok(ChatResult {
             conversation_id,
             final_text: full_text,
@@ -265,5 +325,98 @@ impl BuddyEngine {
             input_tokens,
             output_tokens,
         })
+    }
+}
+
+/// Persistence helper methods
+impl BuddyEngine {
+    /// Load workspaces from disk. Returns empty HashMap if file doesn't exist or is invalid.
+    fn load_workspaces(data_dir: &PathBuf) -> HashMap<String, Workspace> {
+        let path = data_dir.join(WORKSPACES_FILE);
+        match fs::read_to_string(&path) {
+            Ok(contents) => serde_json::from_str(&contents).unwrap_or_else(|e| {
+                eprintln!("Failed to parse {}: {}", path.display(), e);
+                HashMap::new()
+            }),
+            Err(_) => HashMap::new(),
+        }
+    }
+
+    /// Load conversations from disk. Returns empty HashMap if file doesn't exist or is invalid.
+    fn load_conversations(data_dir: &PathBuf) -> HashMap<String, Vec<Conversation>> {
+        let path = data_dir.join(CONVERSATIONS_FILE);
+        match fs::read_to_string(&path) {
+            Ok(contents) => serde_json::from_str(&contents).unwrap_or_else(|e| {
+                eprintln!("Failed to parse {}: {}", path.display(), e);
+                HashMap::new()
+            }),
+            Err(_) => HashMap::new(),
+        }
+    }
+
+    /// Load all message histories from disk based on known conversations.
+    fn load_all_messages(
+        data_dir: &PathBuf,
+        conversations: &HashMap<String, Vec<Conversation>>,
+    ) -> HashMap<String, Vec<StoredMessage>> {
+        let messages_dir = data_dir.join(MESSAGES_DIR);
+        let mut all_messages = HashMap::new();
+
+        for convs in conversations.values() {
+            for conv in convs {
+                let path = messages_dir.join(format!("{}.json", conv.id));
+                if let Ok(contents) = fs::read_to_string(&path) {
+                    if let Ok(msgs) = serde_json::from_str::<Vec<StoredMessage>>(&contents) {
+                        all_messages.insert(conv.id.clone(), msgs);
+                    }
+                }
+                // Initialize with empty vec if not loaded
+                all_messages.entry(conv.id.clone()).or_insert_with(Vec::new);
+            }
+        }
+
+        all_messages
+    }
+
+    /// Save workspaces to disk.
+    fn save_workspaces(&self) {
+        let path = self.data_dir.join(WORKSPACES_FILE);
+        let workspaces = self.workspaces.read();
+        if let Err(e) = fs::write(&path, serde_json::to_string_pretty(&*workspaces).unwrap_or_default()) {
+            eprintln!("Failed to save workspaces to {}: {}", path.display(), e);
+        }
+    }
+
+    /// Save conversations to disk.
+    fn save_conversations(&self) {
+        let path = self.data_dir.join(CONVERSATIONS_FILE);
+        let conversations = self.conversations.read();
+        if let Err(e) = fs::write(&path, serde_json::to_string_pretty(&*conversations).unwrap_or_default()) {
+            eprintln!("Failed to save conversations to {}: {}", path.display(), e);
+        }
+    }
+
+    /// Save message history for a specific conversation to disk.
+    fn save_messages(&self, conversation_id: &str) {
+        let messages_dir = self.data_dir.join(MESSAGES_DIR);
+        let path = messages_dir.join(format!("{}.json", conversation_id));
+        let history = self.message_history.read();
+        if let Some(messages) = history.get(conversation_id) {
+            if let Err(e) = fs::write(&path, serde_json::to_string_pretty(messages).unwrap_or_default()) {
+                eprintln!("Failed to save messages to {}: {}", path.display(), e);
+            }
+        }
+    }
+
+    /// Delete message file for a conversation.
+    fn delete_message_file(&self, conversation_id: &str) {
+        let messages_dir = self.data_dir.join(MESSAGES_DIR);
+        let path = messages_dir.join(format!("{}.json", conversation_id));
+        if let Err(e) = fs::remove_file(&path) {
+            // Only log if it's not a "file not found" error
+            if e.kind() != std::io::ErrorKind::NotFound {
+                eprintln!("Failed to delete message file {}: {}", path.display(), e);
+            }
+        }
     }
 }

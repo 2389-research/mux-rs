@@ -1,15 +1,16 @@
 // ABOUTME: Core data types for mux-ffi, exposed to Swift via UniFFI.
 // ABOUTME: These mirror the design doc's data model.
 
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-#[derive(Debug, Clone, PartialEq, uniffi::Enum)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, uniffi::Enum)]
 pub enum Provider {
     Anthropic,
     OpenAI,
 }
 
-#[derive(Debug, Clone, uniffi::Record)]
+#[derive(Debug, Clone, Serialize, Deserialize, uniffi::Record)]
 pub struct LlmConfig {
     pub provider: Provider,
     pub model: String,
@@ -34,7 +35,7 @@ impl LlmConfig {
     }
 }
 
-#[derive(Debug, Clone, uniffi::Record)]
+#[derive(Debug, Clone, Serialize, Deserialize, uniffi::Record)]
 pub struct Workspace {
     pub id: String,
     pub name: String,
@@ -61,7 +62,7 @@ pub struct WorkspaceSummary {
     pub conversation_count: u32,
 }
 
-#[derive(Debug, Clone, uniffi::Record)]
+#[derive(Debug, Clone, Serialize, Deserialize, uniffi::Record)]
 pub struct Conversation {
     pub id: String,
     pub workspace_id: String,
