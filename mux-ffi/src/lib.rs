@@ -6,6 +6,9 @@ uniffi::setup_scaffolding!();
 mod types;
 pub use types::*;
 
+mod engine;
+pub use engine::*;
+
 #[derive(Debug, thiserror::Error, uniffi::Error)]
 pub enum MuxFfiError {
     #[error("Engine error: {message}")]
@@ -38,5 +41,28 @@ mod tests {
     fn test_llm_config_default() {
         let config = LlmConfig::anthropic("claude-sonnet-4-20250514".to_string());
         assert_eq!(config.provider, Provider::Anthropic);
+    }
+
+    #[test]
+    fn test_engine_creation() {
+        let engine = BuddyEngine::new("/tmp/buddy-test".to_string()).unwrap();
+        assert!(engine.list_workspaces().is_empty());
+    }
+
+    #[test]
+    fn test_workspace_crud() {
+        let engine = BuddyEngine::new("/tmp/buddy-test-crud".to_string()).unwrap();
+
+        // Create
+        let ws = engine.create_workspace("Test Project".to_string(), None).unwrap();
+        assert_eq!(ws.name, "Test Project");
+
+        // List
+        let workspaces = engine.list_workspaces();
+        assert_eq!(workspaces.len(), 1);
+
+        // Delete
+        engine.delete_workspace(ws.id.clone()).unwrap();
+        assert!(engine.list_workspaces().is_empty());
     }
 }
