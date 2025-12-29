@@ -926,6 +926,7 @@ dependencies = [
 name = "mux-ffi"
 version = "0.1.0"
 dependencies = [
+ "futures",
  "mux",
  "parking_lot",
  "serde",
