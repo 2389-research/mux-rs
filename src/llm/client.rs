@@ -21,8 +21,11 @@ pub enum StreamEvent {
         block: super::ContentBlock,
     },
 
-    /// Delta for a content block (usually text).
+    /// Delta for a content block (text content).
     ContentBlockDelta { index: usize, text: String },
+
+    /// Delta for tool input JSON (accumulate to reconstruct full input).
+    InputJsonDelta { index: usize, partial_json: String },
 
     /// A content block finished.
     ContentBlockStop { index: usize },

@@ -508,10 +508,10 @@ impl super::client::LlmClient for OpenAIClient {
                                         }
                                         if let Some(args) = func.arguments {
                                             current_tool_calls[idx].2.push_str(&args);
-                                            // Yield as content delta for accumulator
-                                            yield StreamEvent::ContentBlockDelta {
+                                            // Yield as input JSON delta for tool argument accumulation
+                                            yield StreamEvent::InputJsonDelta {
                                                 index: idx + 1, // offset by 1 for tool calls
-                                                text: args,
+                                                partial_json: args,
                                             };
                                         }
                                     }
