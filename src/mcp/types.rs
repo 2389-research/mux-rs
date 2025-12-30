@@ -125,8 +125,10 @@ pub enum McpTransport {
         args: Vec<String>,
         env: HashMap<String, String>,
     },
-    /// SSE transport - connect to HTTP endpoint.
+    /// SSE transport - connect to HTTP endpoint with Server-Sent Events.
     Sse { url: String },
+    /// HTTP transport - simple request/response over HTTP (Streamable HTTP).
+    Http { url: String },
 }
 
 /// Configuration for an MCP server.

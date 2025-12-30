@@ -1,10 +1,10 @@
-// ABOUTME: MCP client for connecting to MCP servers via stdio or SSE.
+// ABOUTME: MCP client for connecting to MCP servers via stdio, SSE, or HTTP.
 // ABOUTME: Supports full MCP protocol: tools, resources, prompts, roots, logging.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use super::transport::{SseTransport, StdioTransport, Transport};
+use super::transport::{HttpTransport, SseTransport, StdioTransport, Transport};
 use super::{
     McpInitializeResult, McpLogLevel, McpNotification, McpPromptGetResult, McpPromptsListResult,
     McpRequest, McpResourceContent, McpResourceReadResult, McpResourceTemplatesListResult,
@@ -28,6 +28,7 @@ impl McpClient {
                 Arc::new(StdioTransport::connect(command, args, env).await?)
             }
             McpTransport::Sse { url } => Arc::new(SseTransport::connect(url).await?),
+            McpTransport::Http { url } => Arc::new(HttpTransport::connect(url).await?),
         };
 
         Ok(Self {
