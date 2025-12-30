@@ -397,6 +397,7 @@ impl HttpTransport {
     pub async fn connect(url: &str) -> Result<Self, McpError> {
         let http_client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(30))
+            .user_agent(format!("mux-rs/{}", env!("CARGO_PKG_VERSION")))
             .build()
             .map_err(|e| McpError::Connection(format!("Failed to create HTTP client: {}", e)))?;
 
@@ -427,6 +428,7 @@ impl HttpTransport {
 #[async_trait]
 impl Transport for HttpTransport {
     async fn send(&self, request: McpRequest) -> Result<McpResponse, McpError> {
+        let request_id = request.id;
         let json = serde_json::to_string(&request)?;
 
         let mut req_builder = self
@@ -471,6 +473,14 @@ impl Transport for HttpTransport {
         let mcp_response: McpResponse = serde_json::from_str(&body)
             .map_err(|e| McpError::Protocol(format!("Invalid JSON-RPC response: {}", e)))?;
 
+        // Validate response ID matches request ID
+        if mcp_response.id != request_id {
+            return Err(McpError::Protocol(format!(
+                "Response ID {} does not match request ID {}",
+                mcp_response.id, request_id
+            )));
+        }
+
         Ok(mcp_response)
     }
 
@@ -480,18 +490,30 @@ impl Transport for HttpTransport {
         let mut req_builder = self
             .http_client
             .post(&self.endpoint_url)
-            .header("Content-Type", "application/json");
+            .header("Content-Type", "application/json")
+            .header("Accept", "application/json");
 
         // Add session ID header if present
         if let Some(session_id) = self.session_id.lock().await.as_ref() {
             req_builder = req_builder.header("Mcp-Session-Id", session_id.clone());
         }
 
-        req_builder
+        let response = req_builder
             .body(json)
             .send()
             .await
             .map_err(|e| McpError::Connection(format!("HTTP request failed: {}", e)))?;
+
+        // Check response status (notifications should still succeed)
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            return Err(McpError::Protocol(format!(
+                "HTTP {} on notify - {}",
+                status.as_u16(),
+                body
+            )));
+        }
 
         Ok(())
     }
