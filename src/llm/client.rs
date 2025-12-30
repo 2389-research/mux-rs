@@ -21,10 +21,20 @@ pub enum StreamEvent {
         block: super::ContentBlock,
     },
 
-    /// Delta for a content block (text content).
+    /// Delta for a content block (text content only).
+    /// Text deltas should be concatenated to build the complete text.
     ContentBlockDelta { index: usize, text: String },
 
-    /// Delta for tool input JSON (accumulate to reconstruct full input).
+    /// Delta for tool input JSON arguments.
+    /// These arrive after `ContentBlockStart` for a `ToolUse` block.
+    /// Accumulate `partial_json` values and parse as JSON at `ContentBlockStop`.
+    ///
+    /// Event order for tool calls:
+    /// 1. `ContentBlockStart` with `ToolUse { id, name, input: {} }`
+    /// 2. Zero or more `InputJsonDelta` with partial JSON fragments
+    /// 3. `ContentBlockStop`
+    ///
+    /// The `index` matches the `ContentBlockStart` index for the tool block.
     InputJsonDelta { index: usize, partial_json: String },
 
     /// A content block finished.

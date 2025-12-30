@@ -41,14 +41,14 @@ impl StreamAccumulator {
                 }
             }
             StreamEvent::ContentBlockDelta { text, .. } => {
-                // Could be text delta or tool input delta
-                if self.current_tool_id.is_some() {
-                    // Accumulating tool input JSON
-                    self.current_tool_input.push_str(&text);
-                } else {
-                    // Accumulating text
+                // Text content delta - only accumulate if not in a tool block
+                if self.current_tool_id.is_none() {
                     self.current_text.push_str(&text);
                 }
+            }
+            StreamEvent::InputJsonDelta { partial_json, .. } => {
+                // Tool input JSON delta - accumulate for tool calls
+                self.current_tool_input.push_str(&partial_json);
             }
             StreamEvent::ContentBlockStop { .. } => {
                 // Finalize the current block

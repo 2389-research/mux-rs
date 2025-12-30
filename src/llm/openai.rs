@@ -455,7 +455,9 @@ impl super::client::LlmClient for OpenAIClient {
             let mut stream = response.bytes_stream();
             let mut buffer = String::new();
             let mut message_started = false;
-            let mut current_tool_calls: Vec<(String, String, String)> = Vec::new(); // (id, name, args)
+            let mut text_block_started = false;
+            // Track tool calls: (id, name, args, block_started)
+            let mut current_tool_calls: Vec<(String, String, String, bool)> = Vec::new();
 
             while let Some(chunk) = futures::StreamExt::next(&mut stream).await {
                 let chunk = chunk?;
@@ -482,6 +484,14 @@ impl super::client::LlmClient for OpenAIClient {
                         for choice in chunk.choices {
                             // Handle text content
                             if let Some(text) = choice.delta.content {
+                                // Emit ContentBlockStart for text on first text delta
+                                if !text_block_started {
+                                    yield StreamEvent::ContentBlockStart {
+                                        index: 0,
+                                        block: ContentBlock::Text { text: String::new() },
+                                    };
+                                    text_block_started = true;
+                                }
                                 yield StreamEvent::ContentBlockDelta {
                                     index: 0,
                                     text,
@@ -495,7 +505,7 @@ impl super::client::LlmClient for OpenAIClient {
 
                                     // Ensure we have space for this tool call
                                     while current_tool_calls.len() <= idx {
-                                        current_tool_calls.push((String::new(), String::new(), String::new()));
+                                        current_tool_calls.push((String::new(), String::new(), String::new(), false));
                                     }
 
                                     // Accumulate tool call data
@@ -506,6 +516,21 @@ impl super::client::LlmClient for OpenAIClient {
                                         if let Some(name) = func.name {
                                             current_tool_calls[idx].1 = name;
                                         }
+
+                                        // Emit ContentBlockStart when we have id and name (before JSON deltas)
+                                        let (ref id, ref name, _, ref mut started) = current_tool_calls[idx];
+                                        if !*started && !id.is_empty() && !name.is_empty() {
+                                            yield StreamEvent::ContentBlockStart {
+                                                index: idx + 1, // offset by 1 for tool calls (text is 0)
+                                                block: ContentBlock::ToolUse {
+                                                    id: id.clone(),
+                                                    name: name.clone(),
+                                                    input: serde_json::Value::Object(serde_json::Map::new()),
+                                                },
+                                            };
+                                            *started = true;
+                                        }
+
                                         if let Some(args) = func.arguments {
                                             current_tool_calls[idx].2.push_str(&args);
                                             // Yield as input JSON delta for tool argument accumulation
@@ -520,17 +545,14 @@ impl super::client::LlmClient for OpenAIClient {
 
                             // Handle finish reason
                             if let Some(reason) = choice.finish_reason {
-                                // Emit tool call blocks
-                                for (idx, (id, name, _)) in current_tool_calls.iter().enumerate() {
-                                    if !id.is_empty() {
-                                        yield StreamEvent::ContentBlockStart {
-                                            index: idx + 1,
-                                            block: ContentBlock::ToolUse {
-                                                id: id.clone(),
-                                                name: name.clone(),
-                                                input: serde_json::Value::Object(serde_json::Map::new()),
-                                            },
-                                        };
+                                // Close text block if started
+                                if text_block_started {
+                                    yield StreamEvent::ContentBlockStop { index: 0 };
+                                }
+
+                                // Close tool call blocks
+                                for (idx, (id, _, _, started)) in current_tool_calls.iter().enumerate() {
+                                    if *started && !id.is_empty() {
                                         yield StreamEvent::ContentBlockStop { index: idx + 1 };
                                     }
                                 }
