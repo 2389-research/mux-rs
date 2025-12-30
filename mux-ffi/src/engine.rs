@@ -33,6 +33,9 @@ const WORKSPACES_FILE: &str = "workspaces.json";
 const CONVERSATIONS_FILE: &str = "conversations.json";
 const MESSAGES_DIR: &str = "messages";
 
+/// Default LLM model when workspace doesn't specify one
+const DEFAULT_MODEL: &str = "claude-sonnet-4-20250514";
+
 /// Holds a connected MCP client and its available tools.
 struct McpClientHandle {
     client: Arc<TokioMutex<McpClient>>,
@@ -137,12 +140,21 @@ impl BuddyEngine {
             .map(|convs| convs.iter().map(|c| c.id.clone()).collect())
             .unwrap_or_default();
 
-        // Remove any connected MCP clients for this workspace (fire and forget shutdown)
+        // Remove any connected MCP clients for this workspace (fire and forget shutdown).
         // We remove from the map synchronously to prevent new tool calls,
         // but shutdown happens in the background to avoid blocking.
+        // NOTE: This is intentionally fire-and-forget. Callers should not expect
+        // synchronous cleanup. If the app exits immediately after deletion, some
+        // MCP servers may not receive clean shutdown signals.
         if let Some(clients) = self.mcp_clients.write().remove(&workspace_id) {
             std::thread::spawn(move || {
-                let rt = tokio::runtime::Runtime::new().unwrap();
+                let rt = match tokio::runtime::Runtime::new() {
+                    Ok(rt) => rt,
+                    Err(e) => {
+                        eprintln!("Failed to create runtime for MCP cleanup: {}", e);
+                        return;
+                    }
+                };
                 rt.block_on(async {
                     for (name, handle) in clients {
                         let client = handle.client.lock().await;
@@ -231,7 +243,13 @@ impl BuddyEngine {
         let cb = callback.clone();
 
         std::thread::spawn(move || {
-            let rt = Runtime::new().unwrap();
+            let rt = match Runtime::new() {
+                Ok(rt) => rt,
+                Err(e) => {
+                    cb.on_error(format!("Failed to create async runtime: {}", e));
+                    return;
+                }
+            };
             rt.block_on(async move {
                 match engine
                     .do_send_message(conversation_id.clone(), content, cb.clone())
@@ -338,7 +356,13 @@ impl BuddyEngine {
     pub fn connect_workspace_servers(self: Arc<Self>, workspace_id: String) {
         let engine = self.clone();
         std::thread::spawn(move || {
-            let rt = Runtime::new().unwrap();
+            let rt = match Runtime::new() {
+                Ok(rt) => rt,
+                Err(e) => {
+                    eprintln!("Failed to create async runtime for MCP connection: {}", e);
+                    return;
+                }
+            };
             rt.block_on(async move {
                 if let Err(e) = engine.do_connect_workspace_servers(workspace_id).await {
                     eprintln!("Failed to connect workspace servers: {}", e);
@@ -361,7 +385,13 @@ impl BuddyEngine {
     pub fn disconnect_workspace_servers(self: Arc<Self>, workspace_id: String) {
         let engine = self.clone();
         std::thread::spawn(move || {
-            let rt = Runtime::new().unwrap();
+            let rt = match Runtime::new() {
+                Ok(rt) => rt,
+                Err(e) => {
+                    eprintln!("Failed to create async runtime for MCP disconnection: {}", e);
+                    return;
+                }
+            };
             rt.block_on(async move {
                 engine.do_disconnect_workspace_servers(&workspace_id).await;
             });
@@ -547,55 +577,6 @@ impl BuddyEngine {
             Ok(content_text)
         }
     }
-
-    /// Execute a tool call on an MCP server (used by external callers).
-    #[allow(dead_code)]
-    async fn execute_tool(
-        &self,
-        workspace_id: &str,
-        server_name: &str,
-        tool_name: &str,
-        arguments: serde_json::Value,
-    ) -> Result<String, String> {
-        // Clone the Arc<TokioMutex<McpClient>> and drop the RwLock BEFORE any async operations.
-        // This prevents deadlock: parking_lot::RwLock is NOT async-aware and will block the
-        // executor if held across an await point.
-        let client_arc = {
-            let clients = self.mcp_clients.read();
-            let workspace_clients = clients
-                .get(workspace_id)
-                .ok_or_else(|| "Workspace not connected".to_string())?;
-            let handle = workspace_clients
-                .get(server_name)
-                .ok_or_else(|| format!("Server '{}' not connected", server_name))?;
-            Arc::clone(&handle.client)
-        }; // RwLock dropped here, before any await
-
-        let client = client_arc.lock().await;
-        let result = client
-            .call_tool(tool_name, arguments)
-            .await
-            .map_err(|e| e.to_string())?;
-
-        // Convert McpToolResult to string
-        let content_text: String = result
-            .content
-            .iter()
-            .map(|block| match block {
-                McpContentBlock::Text { text } => text.clone(),
-                McpContentBlock::Image { data, mime_type } => {
-                    format!("[Image: {} bytes, type: {}]", data.len(), mime_type)
-                }
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-
-        if result.is_error {
-            Err(content_text)
-        } else {
-            Ok(content_text)
-        }
-    }
 }
 
 impl BuddyEngine {
@@ -720,7 +701,7 @@ impl BuddyEngine {
         // Get model from workspace config, falling back to default
         let model = self
             .get_model_for_conversation(&conversation_id)
-            .unwrap_or_else(|| "claude-sonnet-4-20250514".to_string());
+            .unwrap_or_else(|| DEFAULT_MODEL.to_string());
 
         let mut total_tool_use_count = 0u32;
         let mut total_input_tokens = 0u32;
@@ -776,7 +757,8 @@ impl BuddyEngine {
             total_output_tokens += response.usage.output_tokens;
 
             // Process the response content
-            let mut tool_uses: Vec<(String, String, String, serde_json::Value)> = Vec::new();
+            // Tuple: (tool_use_id, qualified_name "server:tool", arguments)
+            let mut tool_uses: Vec<(String, String, serde_json::Value)> = Vec::new();
             let mut response_text = String::new();
 
             for block in &response.content {
@@ -786,7 +768,7 @@ impl BuddyEngine {
                         callback.on_text_delta(text.clone());
                     }
                     ContentBlock::ToolUse { id, name, input } => {
-                        tool_uses.push((id.clone(), name.clone(), name.clone(), input.clone()));
+                        tool_uses.push((id.clone(), name.clone(), input.clone()));
                     }
                     ContentBlock::ToolResult { .. } => {
                         // Should not appear in assistant response
@@ -815,7 +797,7 @@ impl BuddyEngine {
             // Process tool uses
             let mut tool_results: Vec<ContentBlock> = Vec::new();
 
-            for (tool_use_id, qualified_name, _display_name, arguments) in tool_uses {
+            for (tool_use_id, qualified_name, arguments) in tool_uses {
                 total_tool_use_count += 1;
 
                 // Parse server:tool format
@@ -860,7 +842,11 @@ impl BuddyEngine {
                 }
             }
 
-            // Store assistant response with tool uses in history as text representation
+            // Store assistant response with tool uses in history as text representation.
+            // NOTE (MVP limitation): We store tool results as text "[Tool Result {id}]: {content}"
+            // rather than proper ToolUse/ToolResult ContentBlocks. This loses semantic structure
+            // but works for simple conversations. Future improvement: store structured messages
+            // and reconstruct proper ContentBlock types when building the request.
             {
                 let mut history = self.message_history.write();
                 if let Some(messages) = history.get_mut(&conversation_id) {
