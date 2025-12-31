@@ -12,6 +12,8 @@ use mux::prelude::{
     McpServerConfig as MuxMcpServerConfig, McpToolInfo, McpTransport, Message, Request, Role,
     StopReason, ToolDefinition,
 };
+use mux::tool::Tool;
+use mux::tools::{BashTool, ListFilesTool, ReadFileTool, SearchTool, WriteFileTool};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -61,6 +63,8 @@ pub struct BuddyEngine {
     /// Pending tool approval requests, keyed by tool_use_id -> oneshot sender
     pending_approvals:
         Arc<RwLock<HashMap<String, tokio::sync::oneshot::Sender<ApprovalDecision>>>>,
+    /// Built-in tools from mux (always available)
+    builtin_tools: Vec<Arc<dyn Tool>>,
 }
 
 #[uniffi::export]
@@ -84,6 +88,15 @@ impl BuddyEngine {
         let conversations = Self::load_conversations(&path);
         let message_history = Self::load_all_messages(&path, &conversations);
 
+        // Initialize built-in tools
+        let builtin_tools: Vec<Arc<dyn Tool>> = vec![
+            Arc::new(ReadFileTool),
+            Arc::new(WriteFileTool),
+            Arc::new(ListFilesTool),
+            Arc::new(SearchTool),
+            Arc::new(BashTool),
+        ];
+
         Ok(Arc::new(Self {
             data_dir: path,
             workspaces: Arc::new(RwLock::new(workspaces)),
@@ -92,6 +105,7 @@ impl BuddyEngine {
             api_keys: Arc::new(RwLock::new(HashMap::new())),
             mcp_clients: Arc::new(RwLock::new(HashMap::new())),
             pending_approvals: Arc::new(RwLock::new(HashMap::new())),
+            builtin_tools,
         }))
     }
 
@@ -511,23 +525,34 @@ impl BuddyEngine {
     }
 
     /// Get all tools available for a workspace as ToolDefinitions for the LLM.
+    /// Includes both built-in mux tools and any connected MCP server tools.
     fn get_workspace_tools(&self, workspace_id: &str) -> Vec<ToolDefinition> {
-        let clients = self.mcp_clients.read();
-        let workspace_clients = match clients.get(workspace_id) {
-            Some(c) => c,
-            None => return Vec::new(),
-        };
+        let mut tools = Vec::new();
 
-        workspace_clients
-            .values()
-            .flat_map(|handle| {
-                handle.tools.iter().map(|tool| ToolDefinition {
-                    name: format!("{}:{}", handle.server_name, tool.name),
-                    description: tool.description.clone(),
-                    input_schema: tool.input_schema.clone(),
-                })
-            })
-            .collect()
+        // Add built-in tools (always available, no prefix)
+        for tool in &self.builtin_tools {
+            tools.push(ToolDefinition {
+                name: tool.name().to_string(),
+                description: tool.description().to_string(),
+                input_schema: tool.schema(),
+            });
+        }
+
+        // Add MCP tools (prefixed with server name)
+        let clients = self.mcp_clients.read();
+        if let Some(workspace_clients) = clients.get(workspace_id) {
+            for handle in workspace_clients.values() {
+                for mcp_tool in &handle.tools {
+                    tools.push(ToolDefinition {
+                        name: format!("{}:{}", handle.server_name, mcp_tool.name),
+                        description: mcp_tool.description.clone(),
+                        input_schema: mcp_tool.input_schema.clone(),
+                    });
+                }
+            }
+        }
+
+        tools
     }
 
     /// Find the MCP client and tool name for a qualified tool name (server:tool).
@@ -797,48 +822,67 @@ impl BuddyEngine {
             // Process tool uses
             let mut tool_results: Vec<ContentBlock> = Vec::new();
 
-            for (tool_use_id, qualified_name, arguments) in tool_uses {
+            for (tool_use_id, tool_name, arguments) in tool_uses {
                 total_tool_use_count += 1;
 
-                // Parse server:tool format
-                let (server_name, tool_name) = match self.parse_tool_name(&qualified_name) {
-                    Some((s, t)) => (s, t),
-                    None => {
-                        let error_msg = format!("Invalid tool name format: {}", qualified_name);
-                        tool_results.push(ContentBlock::tool_error(&tool_use_id, &error_msg));
-                        callback.on_tool_result(tool_use_id.clone(), error_msg);
-                        continue;
-                    }
-                };
+                // Check if this is a built-in tool (no colon in name)
+                let builtin_tool = self.builtin_tools.iter().find(|t| t.name() == tool_name);
 
-                // Notify callback about tool use
-                callback.on_tool_use(ToolUseRequest {
-                    id: tool_use_id.clone(),
-                    tool_name: tool_name.clone(),
-                    server_name: server_name.clone(),
-                    arguments: serde_json::to_string(&arguments).unwrap_or_default(),
-                });
+                if let Some(tool) = builtin_tool {
+                    // Execute built-in tool
+                    callback.on_tool_use(ToolUseRequest {
+                        id: tool_use_id.clone(),
+                        tool_name: tool_name.clone(),
+                        server_name: "builtin".to_string(),
+                        arguments: serde_json::to_string(&arguments).unwrap_or_default(),
+                    });
 
-                // For MVP: Auto-approve all tool calls
-                // In future, we could wait for approval via pending_approvals
+                    match tool.execute(arguments).await {
+                        Ok(result) => {
+                            callback.on_tool_result(tool_use_id.clone(), result.content.clone());
+                            if result.is_error {
+                                tool_results.push(ContentBlock::tool_error(&tool_use_id, &result.content));
+                            } else {
+                                tool_results.push(ContentBlock::tool_result(&tool_use_id, &result.content));
+                            }
+                        }
+                        Err(e) => {
+                            let error_msg = format!("Tool execution failed: {}", e);
+                            callback.on_tool_result(tool_use_id.clone(), error_msg.clone());
+                            tool_results.push(ContentBlock::tool_error(&tool_use_id, &error_msg));
+                        }
+                    }
+                } else if let Some((server_name, mcp_tool_name)) = self.parse_tool_name(&tool_name) {
+                    // Execute MCP tool (server:tool format)
+                    callback.on_tool_use(ToolUseRequest {
+                        id: tool_use_id.clone(),
+                        tool_name: mcp_tool_name.clone(),
+                        server_name: server_name.clone(),
+                        arguments: serde_json::to_string(&arguments).unwrap_or_default(),
+                    });
 
-                // Execute the tool using captured MCP clients (immune to workspace disconnect)
-                match Self::execute_tool_with_captured_client(
-                    &captured_mcp_clients,
-                    &server_name,
-                    &tool_name,
-                    arguments,
-                )
-                .await
-                {
-                    Ok(result) => {
-                        callback.on_tool_result(tool_use_id.clone(), result.clone());
-                        tool_results.push(ContentBlock::tool_result(&tool_use_id, &result));
+                    match Self::execute_tool_with_captured_client(
+                        &captured_mcp_clients,
+                        &server_name,
+                        &mcp_tool_name,
+                        arguments,
+                    )
+                    .await
+                    {
+                        Ok(result) => {
+                            callback.on_tool_result(tool_use_id.clone(), result.clone());
+                            tool_results.push(ContentBlock::tool_result(&tool_use_id, &result));
+                        }
+                        Err(e) => {
+                            callback.on_tool_result(tool_use_id.clone(), format!("Error: {}", e));
+                            tool_results.push(ContentBlock::tool_error(&tool_use_id, &e));
+                        }
                     }
-                    Err(e) => {
-                        callback.on_tool_result(tool_use_id.clone(), format!("Error: {}", e));
-                        tool_results.push(ContentBlock::tool_error(&tool_use_id, &e));
-                    }
+                } else {
+                    // Unknown tool format
+                    let error_msg = format!("Unknown tool: {}", tool_name);
+                    tool_results.push(ContentBlock::tool_error(&tool_use_id, &error_msg));
+                    callback.on_tool_result(tool_use_id.clone(), error_msg);
                 }
             }
 
