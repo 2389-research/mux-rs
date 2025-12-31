@@ -765,8 +765,37 @@ impl BuddyEngine {
                     .unwrap_or_default()
             };
 
-            // Create request with tools
-            let mut request = Request::new(&model).messages(messages).max_tokens(4096);
+            // Build system prompt with tool guidance
+            let workspace_path = workspace_id
+                .as_ref()
+                .and_then(|ws_id| {
+                    self.workspaces.read().get(ws_id).and_then(|ws| ws.path.clone())
+                })
+                .unwrap_or_else(|| "~".to_string());
+
+            let tool_list: String = tools
+                .iter()
+                .map(|t| format!("- {}: {}", t.name, t.description))
+                .collect::<Vec<_>>()
+                .join("\n");
+
+            let system_prompt = format!(
+                "You are BuddyAgent, a helpful AI assistant with access to local tools.\n\n\
+                Available tools:\n{}\n\n\
+                IMPORTANT: When using file tools, always use ABSOLUTE paths (starting with / or ~).\n\
+                The workspace directory is: {}\n\
+                For example, use '{}/file.txt' instead of just 'file.txt'.\n\n\
+                Be helpful, concise, and use tools when appropriate to complete tasks.",
+                tool_list,
+                workspace_path,
+                workspace_path
+            );
+
+            // Create request with tools and system prompt
+            let mut request = Request::new(&model)
+                .system(&system_prompt)
+                .messages(messages)
+                .max_tokens(4096);
 
             if !tools.is_empty() {
                 request = request.tools(tools.clone());
