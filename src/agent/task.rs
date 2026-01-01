@@ -175,12 +175,17 @@ impl Tool for TaskTool {
         match subagent.run(task).await {
             Ok(result) => {
                 // Save transcript for future resume
-                if let Some(store) = &self.transcript_store {
-                    if let Err(e) = store.save(&result.agent_id, subagent.transcript()).await {
-                        // Log but don't fail - transcript save is best-effort
-                        eprintln!("Warning: failed to save transcript: {}", e);
+                let transcript_saved = if let Some(store) = &self.transcript_store {
+                    match store.save(&result.agent_id, subagent.transcript()).await {
+                        Ok(()) => true,
+                        Err(e) => {
+                            eprintln!("Warning: failed to save transcript: {}", e);
+                            false
+                        }
                     }
-                }
+                } else {
+                    false
+                };
 
                 let output = serde_json::json!({
                     "agent_id": result.agent_id,
@@ -190,7 +195,8 @@ impl Tool for TaskTool {
                     "tokens": {
                         "input": result.usage.input_tokens,
                         "output": result.usage.output_tokens
-                    }
+                    },
+                    "transcript_saved": transcript_saved
                 });
                 Ok(ToolResult::text(serde_json::to_string_pretty(&output)?))
             }

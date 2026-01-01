@@ -85,6 +85,11 @@ impl SubAgent {
     ///
     /// This creates an agent that continues from where a previous run left off,
     /// preserving the conversation history and agent ID.
+    ///
+    /// Note: `tool_use_count` and `usage` are reset to zero for the resumed run.
+    /// The returned `SubAgentResult` will only reflect metrics from this run,
+    /// not cumulative totals across all runs. To track totals, accumulate the
+    /// results from each run externally.
     pub fn resume(
         agent_id: String,
         definition: AgentDefinition,
@@ -221,24 +226,27 @@ impl SubAgent {
                             })
                             .await?;
 
-                        // Check if hook blocked the tool
-                        let tool_result = match hook_action {
-                            HookAction::Block(msg) => {
-                                crate::tool::ToolResult::error(format!("Blocked by hook: {}", msg))
-                            }
+                        // Check if hook blocked the tool, track effective input
+                        let (tool_result, effective_input) = match hook_action {
+                            HookAction::Block(msg) => (
+                                crate::tool::ToolResult::error(format!("Blocked by hook: {}", msg)),
+                                input.clone(),
+                            ),
                             HookAction::Transform(new_input) => {
                                 // Use transformed input
-                                self.execute_tool(name, new_input).await
+                                let result = self.execute_tool(name, new_input.clone()).await;
+                                (result, new_input)
                             }
                             HookAction::Continue => {
-                                self.execute_tool(name, input.clone()).await
+                                let result = self.execute_tool(name, input.clone()).await;
+                                (result, input.clone())
                             }
                         };
 
-                        // Fire PostToolUse hook
+                        // Fire PostToolUse hook with the effective input (after any transform)
                         self.fire_hook(HookEvent::PostToolUse {
                             tool_name: name.clone(),
-                            input: input.clone(),
+                            input: effective_input,
                             result: tool_result.clone(),
                         })
                         .await?;

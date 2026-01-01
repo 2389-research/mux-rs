@@ -127,13 +127,19 @@ impl HookRegistry {
                     return Ok(HookAction::Block(msg));
                 }
                 HookAction::Transform(new_input) => {
-                    // Apply transformation to the event for subsequent hooks
+                    // Transform only valid for PreToolUse events
                     if let HookEvent::PreToolUse { tool_name, .. } = &current_event {
                         current_event = HookEvent::PreToolUse {
                             tool_name: tool_name.clone(),
                             input: new_input.clone(),
                         };
                         final_action = HookAction::Transform(new_input);
+                    } else {
+                        // Transform action returned for non-PreToolUse event - this is a bug
+                        return Err(anyhow::anyhow!(
+                            "HookAction::Transform is only valid for PreToolUse events, got {:?}",
+                            std::mem::discriminant(&current_event)
+                        ));
                     }
                 }
             }
