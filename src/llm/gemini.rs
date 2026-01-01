@@ -33,18 +33,51 @@ pub struct GeminiContent {
 }
 
 /// Gemini content part.
+/// Gemini uses a flat object with optional fields, not a tagged union.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub enum GeminiPart {
-    Text {
-        text: String,
-    },
-    FunctionCall {
-        function_call: GeminiFunctionCall,
-    },
-    FunctionResponse {
-        function_response: GeminiFunctionResponse,
-    },
+pub struct GeminiPart {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub function_call: Option<GeminiFunctionCall>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub function_response: Option<GeminiFunctionResponse>,
+}
+
+impl GeminiPart {
+    /// Create a text part.
+    pub fn text(text: impl Into<String>) -> Self {
+        Self {
+            text: Some(text.into()),
+            function_call: None,
+            function_response: None,
+        }
+    }
+
+    /// Create a function call part.
+    pub fn function_call(name: impl Into<String>, args: serde_json::Value) -> Self {
+        Self {
+            text: None,
+            function_call: Some(GeminiFunctionCall {
+                name: name.into(),
+                args,
+            }),
+            function_response: None,
+        }
+    }
+
+    /// Create a function response part.
+    pub fn function_response(name: impl Into<String>, response: serde_json::Value) -> Self {
+        Self {
+            text: None,
+            function_call: None,
+            function_response: Some(GeminiFunctionResponse {
+                name: name.into(),
+                response,
+            }),
+        }
+    }
 }
 
 /// Gemini function call.
@@ -181,7 +214,23 @@ impl From<&ToolDefinition> for GeminiFunctionDeclaration {
     }
 }
 
-fn convert_message_to_content(msg: &Message) -> GeminiContent {
+/// Build a lookup from tool_use_id to function name from message history.
+fn build_tool_name_lookup(messages: &[Message]) -> std::collections::HashMap<String, String> {
+    let mut lookup = std::collections::HashMap::new();
+    for msg in messages {
+        for block in &msg.content {
+            if let ContentBlock::ToolUse { id, name, .. } = block {
+                lookup.insert(id.clone(), name.clone());
+            }
+        }
+    }
+    lookup
+}
+
+fn convert_message_to_content(
+    msg: &Message,
+    tool_name_lookup: &std::collections::HashMap<String, String>,
+) -> GeminiContent {
     let role = match msg.role {
         Role::User => "user",
         Role::Assistant => "model",
@@ -191,28 +240,25 @@ fn convert_message_to_content(msg: &Message) -> GeminiContent {
         .content
         .iter()
         .filter_map(|block| match block {
-            ContentBlock::Text { text } => Some(GeminiPart::Text { text: text.clone() }),
+            ContentBlock::Text { text } => Some(GeminiPart::text(text)),
             ContentBlock::ToolUse { name, input, .. } => {
-                Some(GeminiPart::FunctionCall {
-                    function_call: GeminiFunctionCall {
-                        name: name.clone(),
-                        args: input.clone(),
-                    },
-                })
+                Some(GeminiPart::function_call(name, input.clone()))
             }
             ContentBlock::ToolResult {
                 tool_use_id,
                 content,
                 ..
             } => {
-                // Gemini uses function name, not ID. We store name in tool_use_id for now.
-                // In practice, you'd need to track the mapping.
-                Some(GeminiPart::FunctionResponse {
-                    function_response: GeminiFunctionResponse {
-                        name: tool_use_id.clone(),
-                        response: serde_json::json!({ "result": content }),
-                    },
-                })
+                // Look up the function name from the tool_use_id.
+                // Fall back to tool_use_id if not found (shouldn't happen in valid conversation).
+                let name = tool_name_lookup
+                    .get(tool_use_id)
+                    .cloned()
+                    .unwrap_or_else(|| tool_use_id.clone());
+                Some(GeminiPart::function_response(
+                    name,
+                    serde_json::json!({ "result": content }),
+                ))
             }
         })
         .collect();
@@ -225,15 +271,18 @@ fn convert_message_to_content(msg: &Message) -> GeminiContent {
 
 impl From<&Request> for GeminiRequest {
     fn from(req: &Request) -> Self {
+        // Build lookup for tool_use_id -> function name mapping
+        let tool_name_lookup = build_tool_name_lookup(&req.messages);
+
         let contents: Vec<GeminiContent> = req
             .messages
             .iter()
-            .map(convert_message_to_content)
+            .map(|msg| convert_message_to_content(msg, &tool_name_lookup))
             .collect();
 
         let system_instruction = req.system.as_ref().map(|s| GeminiContent {
             role: None,
-            parts: vec![GeminiPart::Text { text: s.clone() }],
+            parts: vec![GeminiPart::text(s)],
         });
 
         let generation_config = if req.max_tokens.is_some() || req.temperature.is_some() {
@@ -271,31 +320,33 @@ fn parse_stop_reason(s: Option<&str>) -> StopReason {
     }
 }
 
-fn convert_gemini_response(resp: GeminiResponse, model: String) -> Response {
-    let candidate = resp.candidates.into_iter().next();
+fn convert_gemini_response(resp: GeminiResponse, model: String) -> Result<Response, LlmError> {
+    let candidate = resp.candidates.into_iter().next().ok_or_else(|| LlmError::Api {
+        status: 0,
+        message: "Gemini returned empty candidates (possibly blocked by safety filters)".to_string(),
+    })?;
 
-    let (content, stop_reason) = match candidate {
-        Some(c) => {
-            let blocks: Vec<ContentBlock> = c
-                .content
-                .parts
-                .into_iter()
-                .filter_map(|part| match part {
-                    GeminiPart::Text { text } => Some(ContentBlock::Text { text }),
-                    GeminiPart::FunctionCall { function_call } => {
-                        Some(ContentBlock::ToolUse {
-                            id: uuid::Uuid::new_v4().to_string(),
-                            name: function_call.name,
-                            input: function_call.args,
-                        })
-                    }
-                    GeminiPart::FunctionResponse { .. } => None,
+    let blocks: Vec<ContentBlock> = candidate
+        .content
+        .parts
+        .into_iter()
+        .filter_map(|part| {
+            if let Some(text) = part.text {
+                Some(ContentBlock::Text { text })
+            } else if let Some(fc) = part.function_call {
+                Some(ContentBlock::ToolUse {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    name: fc.name,
+                    input: fc.args,
                 })
-                .collect();
-            (blocks, parse_stop_reason(c.finish_reason.as_deref()))
-        }
-        None => (Vec::new(), StopReason::EndTurn),
-    };
+            } else {
+                // function_response is input, not output
+                None
+            }
+        })
+        .collect();
+
+    let stop_reason = parse_stop_reason(candidate.finish_reason.as_deref());
 
     let usage = resp.usage_metadata.unwrap_or(GeminiUsageMetadata {
         prompt_token_count: 0,
@@ -303,16 +354,16 @@ fn convert_gemini_response(resp: GeminiResponse, model: String) -> Response {
         total_token_count: 0,
     });
 
-    Response {
+    Ok(Response {
         id: uuid::Uuid::new_v4().to_string(),
-        content,
+        content: blocks,
         stop_reason,
         model,
         usage: Usage {
             input_tokens: usage.prompt_token_count,
             output_tokens: usage.candidates_token_count,
         },
-    }
+    })
 }
 
 /// Parse an SSE line from Gemini streaming response.
@@ -345,7 +396,7 @@ impl super::client::LlmClient for GeminiClient {
         }
 
         let gemini_resp: GeminiResponse = response.json().await?;
-        Ok(convert_gemini_response(gemini_resp, req.model.clone()))
+        convert_gemini_response(gemini_resp, req.model.clone())
     }
 
     fn create_message_stream(
@@ -410,53 +461,53 @@ impl super::client::LlmClient for GeminiClient {
 
                         for candidate in gemini_resp.candidates {
                             for part in candidate.content.parts {
-                                match part {
-                                    GeminiPart::Text { text } => {
-                                        // Start text block if needed
-                                        if current_text_index.is_none() {
-                                            yield StreamEvent::ContentBlockStart {
-                                                index: block_index,
-                                                block: ContentBlock::Text { text: String::new() },
-                                            };
-                                            current_text_index = Some(block_index);
-                                            block_index += 1;
-                                        }
-                                        yield StreamEvent::ContentBlockDelta {
-                                            index: current_text_index.unwrap(),
-                                            text,
-                                        };
-                                    }
-                                    GeminiPart::FunctionCall { function_call } => {
-                                        // Close text block if open
-                                        if let Some(idx) = current_text_index.take() {
-                                            yield StreamEvent::ContentBlockStop { index: idx };
-                                        }
-
-                                        let tool_index = block_index;
-                                        block_index += 1;
-
+                                // Handle text content
+                                if let Some(text) = part.text {
+                                    // Start text block if needed
+                                    if current_text_index.is_none() {
                                         yield StreamEvent::ContentBlockStart {
-                                            index: tool_index,
-                                            block: ContentBlock::ToolUse {
-                                                id: uuid::Uuid::new_v4().to_string(),
-                                                name: function_call.name,
-                                                input: serde_json::Value::Object(serde_json::Map::new()),
-                                            },
+                                            index: block_index,
+                                            block: ContentBlock::Text { text: String::new() },
                                         };
-
-                                        // Emit args as JSON delta
-                                        let args_json = serde_json::to_string(&function_call.args).unwrap_or_default();
-                                        yield StreamEvent::InputJsonDelta {
-                                            index: tool_index,
-                                            partial_json: args_json,
-                                        };
-
-                                        yield StreamEvent::ContentBlockStop { index: tool_index };
+                                        current_text_index = Some(block_index);
+                                        block_index += 1;
                                     }
-                                    GeminiPart::FunctionResponse { .. } => {
-                                        // Function responses are input, not output
-                                    }
+                                    yield StreamEvent::ContentBlockDelta {
+                                        index: current_text_index.unwrap(),
+                                        text,
+                                    };
                                 }
+
+                                // Handle function calls
+                                if let Some(fc) = part.function_call {
+                                    // Close text block if open
+                                    if let Some(idx) = current_text_index.take() {
+                                        yield StreamEvent::ContentBlockStop { index: idx };
+                                    }
+
+                                    let tool_index = block_index;
+                                    block_index += 1;
+
+                                    yield StreamEvent::ContentBlockStart {
+                                        index: tool_index,
+                                        block: ContentBlock::ToolUse {
+                                            id: uuid::Uuid::new_v4().to_string(),
+                                            name: fc.name,
+                                            input: serde_json::Value::Object(serde_json::Map::new()),
+                                        },
+                                    };
+
+                                    // Emit args as JSON delta
+                                    let args_json = serde_json::to_string(&fc.args).unwrap_or_default();
+                                    yield StreamEvent::InputJsonDelta {
+                                        index: tool_index,
+                                        partial_json: args_json,
+                                    };
+
+                                    yield StreamEvent::ContentBlockStop { index: tool_index };
+                                }
+
+                                // function_response is input, not output - ignore
                             }
 
                             // Check for finish

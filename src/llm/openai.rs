@@ -490,9 +490,10 @@ impl super::client::LlmClient for OpenAIClient {
             let mut stream = response.bytes_stream();
             let mut buffer = String::new();
             let mut message_started = false;
-            let mut text_block_started = false;
-            // Track tool calls: (id, name, args, block_started)
-            let mut current_tool_calls: Vec<(String, String, String, bool)> = Vec::new();
+            let mut text_block_index: Option<usize> = None;
+            let mut next_block_index = 0usize;
+            // Track tool calls: (id, name, args, block_index, block_started)
+            let mut current_tool_calls: Vec<(String, String, String, usize, bool)> = Vec::new();
 
             while let Some(chunk) = futures::StreamExt::next(&mut stream).await {
                 let chunk = chunk?;
@@ -520,15 +521,17 @@ impl super::client::LlmClient for OpenAIClient {
                             // Handle text content
                             if let Some(text) = choice.delta.content {
                                 // Emit ContentBlockStart for text on first text delta
-                                if !text_block_started {
+                                if text_block_index.is_none() {
+                                    let idx = next_block_index;
+                                    next_block_index += 1;
                                     yield StreamEvent::ContentBlockStart {
-                                        index: 0,
+                                        index: idx,
                                         block: ContentBlock::Text { text: String::new() },
                                     };
-                                    text_block_started = true;
+                                    text_block_index = Some(idx);
                                 }
                                 yield StreamEvent::ContentBlockDelta {
-                                    index: 0,
+                                    index: text_block_index.unwrap(),
                                     text,
                                 };
                             }
@@ -536,27 +539,29 @@ impl super::client::LlmClient for OpenAIClient {
                             // Handle tool calls
                             if let Some(tool_calls) = choice.delta.tool_calls {
                                 for tc in tool_calls {
-                                    let idx = tc.index;
+                                    let tc_idx = tc.index;
 
                                     // Ensure we have space for this tool call
-                                    while current_tool_calls.len() <= idx {
-                                        current_tool_calls.push((String::new(), String::new(), String::new(), false));
+                                    while current_tool_calls.len() <= tc_idx {
+                                        current_tool_calls.push((String::new(), String::new(), String::new(), 0, false));
                                     }
 
                                     // Accumulate tool call data
                                     if let Some(id) = tc.id {
-                                        current_tool_calls[idx].0 = id;
+                                        current_tool_calls[tc_idx].0 = id;
                                     }
                                     if let Some(func) = tc.function {
                                         if let Some(name) = func.name {
-                                            current_tool_calls[idx].1 = name;
+                                            current_tool_calls[tc_idx].1 = name;
                                         }
 
                                         // Emit ContentBlockStart when we have id and name (before JSON deltas)
-                                        let (ref id, ref name, _, ref mut started) = current_tool_calls[idx];
+                                        let (ref id, ref name, _, ref mut block_idx, ref mut started) = current_tool_calls[tc_idx];
                                         if !*started && !id.is_empty() && !name.is_empty() {
+                                            *block_idx = next_block_index;
+                                            next_block_index += 1;
                                             yield StreamEvent::ContentBlockStart {
-                                                index: idx + 1, // offset by 1 for tool calls (text is 0)
+                                                index: *block_idx,
                                                 block: ContentBlock::ToolUse {
                                                     id: id.clone(),
                                                     name: name.clone(),
@@ -567,10 +572,10 @@ impl super::client::LlmClient for OpenAIClient {
                                         }
 
                                         if let Some(args) = func.arguments {
-                                            current_tool_calls[idx].2.push_str(&args);
+                                            current_tool_calls[tc_idx].2.push_str(&args);
                                             // Yield as input JSON delta for tool argument accumulation
                                             yield StreamEvent::InputJsonDelta {
-                                                index: idx + 1, // offset by 1 for tool calls
+                                                index: current_tool_calls[tc_idx].3,
                                                 partial_json: args,
                                             };
                                         }
@@ -581,14 +586,14 @@ impl super::client::LlmClient for OpenAIClient {
                             // Handle finish reason
                             if let Some(reason) = choice.finish_reason {
                                 // Close text block if started
-                                if text_block_started {
-                                    yield StreamEvent::ContentBlockStop { index: 0 };
+                                if let Some(idx) = text_block_index {
+                                    yield StreamEvent::ContentBlockStop { index: idx };
                                 }
 
                                 // Close tool call blocks
-                                for (idx, (id, _, _, started)) in current_tool_calls.iter().enumerate() {
+                                for (id, _, _, block_idx, started) in current_tool_calls.iter() {
                                     if *started && !id.is_empty() {
-                                        yield StreamEvent::ContentBlockStop { index: idx + 1 };
+                                        yield StreamEvent::ContentBlockStop { index: *block_idx };
                                     }
                                 }
 
