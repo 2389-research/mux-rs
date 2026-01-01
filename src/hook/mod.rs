@@ -136,9 +136,16 @@ impl HookRegistry {
                         final_action = HookAction::Transform(new_input);
                     } else {
                         // Transform action returned for non-PreToolUse event - this is a bug
+                        let event_type = match &current_event {
+                            HookEvent::PreToolUse { .. } => "PreToolUse",
+                            HookEvent::PostToolUse { .. } => "PostToolUse",
+                            HookEvent::AgentStart { .. } => "AgentStart",
+                            HookEvent::AgentStop { .. } => "AgentStop",
+                            HookEvent::Iteration { .. } => "Iteration",
+                        };
                         return Err(anyhow::anyhow!(
-                            "HookAction::Transform is only valid for PreToolUse events, got {:?}",
-                            std::mem::discriminant(&current_event)
+                            "HookAction::Transform is only valid for PreToolUse events, got {}",
+                            event_type
                         ));
                     }
                 }
@@ -317,5 +324,54 @@ mod tests {
         } else {
             panic!("Expected Transform action");
         }
+    }
+
+    #[tokio::test]
+    async fn test_transform_on_non_pre_tool_use_errors() {
+        // A hook that always returns Transform regardless of event type
+        struct BadTransformHook;
+
+        #[async_trait]
+        impl Hook for BadTransformHook {
+            async fn on_event(&self, _event: &HookEvent) -> Result<HookAction, anyhow::Error> {
+                // This is a bug - Transform should only be returned for PreToolUse
+                Ok(HookAction::Transform(serde_json::json!({"bad": true})))
+            }
+        }
+
+        let registry = HookRegistry::new();
+        registry.register(BadTransformHook).await;
+
+        // Transform on PostToolUse should error
+        let event = HookEvent::PostToolUse {
+            tool_name: "test".into(),
+            input: serde_json::json!({}),
+            result: crate::tool::ToolResult::text("ok"),
+        };
+        let result = registry.fire(&event).await;
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("PostToolUse"));
+        assert!(err_msg.contains("only valid for PreToolUse"));
+
+        // Transform on AgentStart should error
+        let event = HookEvent::AgentStart {
+            agent_id: "agent-1".into(),
+            task: "test".into(),
+        };
+        let result = registry.fire(&event).await;
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("AgentStart"));
+
+        // Transform on Iteration should error
+        let event = HookEvent::Iteration {
+            agent_id: "agent-1".into(),
+            iteration: 1,
+        };
+        let result = registry.fire(&event).await;
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("Iteration"));
     }
 }
