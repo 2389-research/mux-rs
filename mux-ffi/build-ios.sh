@@ -10,8 +10,20 @@ cd "$SCRIPT_DIR/.."
 echo "==> Building for iOS device (aarch64-apple-ios)..."
 cargo build --release --target aarch64-apple-ios -p mux-ffi
 
+DEVICE_LIB="target/aarch64-apple-ios/release/libmux_ffi.a"
+if [ ! -f "$DEVICE_LIB" ]; then
+  echo "ERROR: iOS device library not found at $DEVICE_LIB"
+  exit 1
+fi
+
 echo "==> Building for iOS simulator (aarch64-apple-ios-sim)..."
 cargo build --release --target aarch64-apple-ios-sim -p mux-ffi
+
+SIM_LIB="target/aarch64-apple-ios-sim/release/libmux_ffi.a"
+if [ ! -f "$SIM_LIB" ]; then
+  echo "ERROR: iOS simulator library not found at $SIM_LIB"
+  exit 1
+fi
 
 echo "==> Generating Swift bindings..."
 uniffi-bindgen generate \
@@ -33,6 +45,10 @@ xcodebuild -create-xcframework \
   -output "$OUTPUT_DIR/MuxFFI.xcframework"
 
 echo "==> Copying Swift bindings..."
+if [ ! -d "mux-ffi/bindings" ]; then
+  echo "ERROR: Bindings directory not found at mux-ffi/bindings"
+  exit 1
+fi
 cp mux-ffi/bindings/*.swift "$OUTPUT_DIR/"
 
 echo "==> Done! XCFramework and bindings at: $OUTPUT_DIR"
