@@ -3,11 +3,13 @@
 
 mod anthropic;
 mod client;
+mod gemini;
 mod openai;
 mod types;
 
 pub use anthropic::*;
 pub use client::*;
+pub use gemini::*;
 pub use openai::*;
 pub use types::*;
 

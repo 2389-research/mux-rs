@@ -9,7 +9,7 @@ use futures::Stream;
 use serde::{Deserialize, Serialize};
 use std::pin::Pin;
 
-const OPENAI_API_URL: &str = "https://api.openai.com/v1/chat/completions";
+const OPENAI_DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
 
 /// OpenAI API request format.
 #[derive(Debug, Serialize)]
@@ -157,10 +157,11 @@ pub struct OpenAIFunctionDelta {
     pub arguments: Option<String>,
 }
 
-/// Client for the OpenAI API.
+/// Client for OpenAI and OpenAI-compatible APIs (OpenRouter, Ollama, etc.).
 #[derive(Debug, Clone)]
 pub struct OpenAIClient {
     api_key: String,
+    base_url: String,
     http: reqwest::Client,
 }
 
@@ -169,6 +170,7 @@ impl OpenAIClient {
     pub fn new(api_key: impl Into<String>) -> Self {
         Self {
             api_key: api_key.into(),
+            base_url: OPENAI_DEFAULT_BASE_URL.to_string(),
             http: reqwest::Client::new(),
         }
     }
@@ -180,6 +182,36 @@ impl OpenAIClient {
             message: "OPENAI_API_KEY environment variable not set".to_string(),
         })?;
         Ok(Self::new(api_key))
+    }
+
+    /// Override the base URL for OpenAI-compatible APIs.
+    pub fn with_base_url(mut self, url: impl Into<String>) -> Self {
+        self.base_url = url.into();
+        self
+    }
+
+    /// Create an OpenRouter client with the given API key.
+    pub fn openrouter(api_key: impl Into<String>) -> Self {
+        Self::new(api_key).with_base_url("https://openrouter.ai/api/v1")
+    }
+
+    /// Create an OpenRouter client from the OPENROUTER_API_KEY environment variable.
+    pub fn openrouter_from_env() -> Result<Self, LlmError> {
+        let api_key = std::env::var("OPENROUTER_API_KEY").map_err(|_| LlmError::Api {
+            status: 0,
+            message: "OPENROUTER_API_KEY environment variable not set".to_string(),
+        })?;
+        Ok(Self::openrouter(api_key))
+    }
+
+    /// Create an Ollama client connecting to localhost:11434.
+    pub fn ollama() -> Self {
+        Self::new("ollama").with_base_url("http://localhost:11434/v1")
+    }
+
+    /// Create an Ollama client connecting to a custom host.
+    pub fn ollama_at(host: impl Into<String>) -> Self {
+        Self::new("ollama").with_base_url(format!("{}/v1", host.into()))
     }
 }
 
@@ -399,10 +431,11 @@ fn parse_sse_line(line: &str) -> Option<OpenAIStreamChunk> {
 impl super::client::LlmClient for OpenAIClient {
     async fn create_message(&self, req: &Request) -> Result<Response, LlmError> {
         let openai_req = OpenAIRequest::from(req);
+        let url = format!("{}/chat/completions", self.base_url);
 
         let response = self
             .http
-            .post(OPENAI_API_URL)
+            .post(&url)
             .header("Authorization", format!("Bearer {}", self.api_key))
             .header("Content-Type", "application/json")
             .json(&openai_req)
@@ -430,11 +463,13 @@ impl super::client::LlmClient for OpenAIClient {
         openai_req.stream = Some(true);
 
         let api_key = self.api_key.clone();
+        let base_url = self.base_url.clone();
         let http = self.http.clone();
 
         Box::pin(async_stream::try_stream! {
+            let url = format!("{}/chat/completions", base_url);
             let response = http
-                .post(OPENAI_API_URL)
+                .post(&url)
                 .header("Authorization", format!("Bearer {}", api_key))
                 .header("Content-Type", "application/json")
                 .json(&openai_req)
