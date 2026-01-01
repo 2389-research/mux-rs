@@ -2,6 +2,7 @@
 // ABOUTME: Includes file I/O, search, command execution, and web access.
 
 mod bash;
+mod edit;
 mod list_files;
 mod read_file;
 mod search;
@@ -10,6 +11,7 @@ mod web_search;
 mod write_file;
 
 pub use bash::BashTool;
+pub use edit::EditTool;
 pub use list_files::ListFilesTool;
 pub use read_file::ReadFileTool;
 pub use search::SearchTool;

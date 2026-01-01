@@ -1,5 +1,5 @@
 // ABOUTME: TaskTool - a tool that spawns subagents to handle delegated tasks.
-// ABOUTME: Register this in a Registry to enable parent agents to spawn children.
+// ABOUTME: Supports resume from previous transcripts for long-running tasks.
 
 use std::sync::Arc;
 
@@ -7,13 +7,15 @@ use async_trait::async_trait;
 
 use super::definition::AgentRegistry;
 use super::runner::SubAgent;
+use super::transcript::TranscriptStore;
 use crate::llm::LlmClient;
 use crate::tool::{Registry, Tool, ToolResult};
 
 /// A tool that spawns subagents to handle delegated tasks.
 ///
 /// When an LLM calls this tool, it spawns a subagent of the specified type,
-/// runs it on the given task, and returns the result.
+/// runs it on the given task, and returns the result. Optionally supports
+/// resuming agents from previous transcripts.
 pub struct TaskTool {
     /// Registry of available agent definitions.
     agent_registry: AgentRegistry,
@@ -23,6 +25,9 @@ pub struct TaskTool {
 
     /// Factory function to create LLM clients for subagents.
     client_factory: Arc<dyn Fn(&str) -> Arc<dyn LlmClient> + Send + Sync>,
+
+    /// Optional transcript store for agent resume.
+    transcript_store: Option<Arc<dyn TranscriptStore>>,
 }
 
 impl TaskTool {
@@ -40,6 +45,7 @@ impl TaskTool {
             agent_registry,
             tool_registry,
             client_factory: Arc::new(client_factory),
+            transcript_store: None,
         }
     }
 
@@ -52,6 +58,12 @@ impl TaskTool {
         let client_clone = client.clone();
         Self::new(agent_registry, tool_registry, move |_| client_clone.clone())
     }
+
+    /// Set a transcript store for agent resume capability.
+    pub fn with_transcript_store(mut self, store: Arc<dyn TranscriptStore>) -> Self {
+        self.transcript_store = Some(store);
+        self
+    }
 }
 
 #[async_trait]
@@ -61,7 +73,8 @@ impl Tool for TaskTool {
     }
 
     fn description(&self) -> &str {
-        "Spawn a subagent to handle a specific task. Use this to delegate work to specialized agents."
+        "Spawn a subagent to handle a specific task. Use this to delegate work to specialized agents. \
+         Optionally resume from a previous agent's transcript."
     }
 
     fn schema(&self) -> serde_json::Value {
@@ -79,6 +92,10 @@ impl Tool for TaskTool {
                 "description": {
                     "type": "string",
                     "description": "A short (3-5 word) description of what the agent will do"
+                },
+                "resume_agent_id": {
+                    "type": "string",
+                    "description": "Optional: ID of a previous agent to resume from its transcript"
                 }
             },
             "required": ["agent_type", "task", "description"]
@@ -96,6 +113,8 @@ impl Tool for TaskTool {
             .get("task")
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("Missing required parameter: task"))?;
+
+        let resume_agent_id = params.get("resume_agent_id").and_then(|v| v.as_str());
 
         // Get agent definition
         let definition = match self.agent_registry.get(agent_type).await {
@@ -117,11 +136,52 @@ impl Tool for TaskTool {
             .unwrap_or_else(|| "claude-sonnet-4-20250514".to_string());
         let client = (self.client_factory)(&model);
 
-        // Create and run the subagent
-        let mut subagent = SubAgent::new(definition, client, self.tool_registry.clone());
+        // Create the subagent (new or resumed)
+        let mut subagent = if let Some(agent_id) = resume_agent_id {
+            // Try to load transcript for resume
+            let transcript = if let Some(store) = &self.transcript_store {
+                match store.load(agent_id).await {
+                    Ok(Some(transcript)) => transcript,
+                    Ok(None) => {
+                        return Ok(ToolResult::error(format!(
+                            "No transcript found for agent_id '{}'",
+                            agent_id
+                        )));
+                    }
+                    Err(e) => {
+                        return Ok(ToolResult::error(format!(
+                            "Failed to load transcript: {}",
+                            e
+                        )));
+                    }
+                }
+            } else {
+                return Ok(ToolResult::error(
+                    "Cannot resume: no transcript store configured",
+                ));
+            };
+
+            SubAgent::resume(
+                agent_id.to_string(),
+                definition,
+                client,
+                self.tool_registry.clone(),
+                transcript,
+            )
+        } else {
+            SubAgent::new(definition, client, self.tool_registry.clone())
+        };
 
         match subagent.run(task).await {
             Ok(result) => {
+                // Save transcript for future resume
+                if let Some(store) = &self.transcript_store {
+                    if let Err(e) = store.save(&result.agent_id, subagent.transcript()).await {
+                        // Log but don't fail - transcript save is best-effort
+                        eprintln!("Warning: failed to save transcript: {}", e);
+                    }
+                }
+
                 let output = serde_json::json!({
                     "agent_id": result.agent_id,
                     "content": result.content,

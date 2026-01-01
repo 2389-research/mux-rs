@@ -1,5 +1,5 @@
 // ABOUTME: SubAgent runner - executes the think-act loop for a spawned agent.
-// ABOUTME: Handles tool execution, conversation management, and result aggregation.
+// ABOUTME: Handles tool execution, conversation management, hooks, and result aggregation.
 
 use std::sync::Arc;
 
@@ -8,6 +8,7 @@ use uuid::Uuid;
 use super::definition::AgentDefinition;
 use super::filter::FilteredRegistry;
 use crate::error::LlmError;
+use crate::hook::{HookAction, HookEvent, HookRegistry};
 use crate::llm::{ContentBlock, LlmClient, Message, Request, Role, Usage};
 use crate::tool::Registry;
 
@@ -52,6 +53,9 @@ pub struct SubAgent {
 
     /// Running total of token usage.
     usage: Usage,
+
+    /// Optional hook registry for lifecycle events.
+    hooks: Option<Arc<HookRegistry>>,
 }
 
 impl SubAgent {
@@ -73,7 +77,41 @@ impl SubAgent {
             messages: Vec::new(),
             tool_use_count: 0,
             usage: Usage::default(),
+            hooks: None,
         }
+    }
+
+    /// Resume a subagent from a previous transcript.
+    ///
+    /// This creates an agent that continues from where a previous run left off,
+    /// preserving the conversation history and agent ID.
+    pub fn resume(
+        agent_id: String,
+        definition: AgentDefinition,
+        client: Arc<dyn LlmClient>,
+        registry: Registry,
+        transcript: Vec<Message>,
+    ) -> Self {
+        let tools = FilteredRegistry::new(registry)
+            .allowed(definition.allowed_tools.clone())
+            .denied(definition.denied_tools.clone());
+
+        Self {
+            agent_id,
+            definition,
+            client,
+            tools,
+            messages: transcript,
+            tool_use_count: 0,
+            usage: Usage::default(),
+            hooks: None,
+        }
+    }
+
+    /// Set the hook registry for lifecycle events.
+    pub fn with_hooks(mut self, hooks: Arc<HookRegistry>) -> Self {
+        self.hooks = Some(hooks);
+        self
     }
 
     /// Get the agent ID.
@@ -81,21 +119,54 @@ impl SubAgent {
         &self.agent_id
     }
 
+    /// Get the current transcript (conversation history).
+    ///
+    /// Use this to save the conversation for later resumption.
+    pub fn transcript(&self) -> &[Message] {
+        &self.messages
+    }
+
     /// Fork conversation context from a parent agent.
     pub fn fork_messages(&mut self, parent_messages: Vec<Message>) {
         self.messages = parent_messages;
     }
 
+    /// Fire a hook event and handle the result.
+    async fn fire_hook(&self, event: HookEvent) -> Result<HookAction, LlmError> {
+        if let Some(hooks) = &self.hooks {
+            hooks.fire(&event).await.map_err(|e| LlmError::Api {
+                status: 0,
+                message: format!("Hook error: {}", e),
+            })
+        } else {
+            Ok(HookAction::Continue)
+        }
+    }
+
     /// Run the agent on a task and return the result.
     pub async fn run(&mut self, task: &str) -> Result<SubAgentResult, LlmError> {
+        // Fire AgentStart hook
+        self.fire_hook(HookEvent::AgentStart {
+            agent_id: self.agent_id.clone(),
+            task: task.to_string(),
+        })
+        .await?;
+
         // Add the task as a user message
         self.messages.push(Message::user(task));
 
         let mut iterations = 0;
 
         // Think-act loop
-        loop {
+        let result = loop {
             iterations += 1;
+
+            // Fire Iteration hook
+            self.fire_hook(HookEvent::Iteration {
+                agent_id: self.agent_id.clone(),
+                iteration: iterations,
+            })
+            .await?;
 
             if iterations > self.definition.max_iterations {
                 return Err(LlmError::Api {
@@ -142,26 +213,43 @@ impl SubAgent {
                     if let ContentBlock::ToolUse { id, name, input } = block {
                         self.tool_use_count += 1;
 
-                        let result = match self.tools.get(name).await {
-                            Some(tool) => {
-                                match tool.execute(input.clone()).await {
-                                    Ok(r) => {
-                                        if r.is_error {
-                                            ContentBlock::tool_error(id, &r.content)
-                                        } else {
-                                            ContentBlock::tool_result(id, &r.content)
-                                        }
-                                    }
-                                    Err(e) => ContentBlock::tool_error(id, e.to_string()),
-                                }
+                        // Fire PreToolUse hook
+                        let hook_action = self
+                            .fire_hook(HookEvent::PreToolUse {
+                                tool_name: name.clone(),
+                                input: input.clone(),
+                            })
+                            .await?;
+
+                        // Check if hook blocked the tool
+                        let tool_result = match hook_action {
+                            HookAction::Block(msg) => {
+                                crate::tool::ToolResult::error(format!("Blocked by hook: {}", msg))
                             }
-                            None => ContentBlock::tool_error(
-                                id,
-                                format!("Tool '{}' not found or not allowed", name),
-                            ),
+                            HookAction::Transform(new_input) => {
+                                // Use transformed input
+                                self.execute_tool(name, new_input).await
+                            }
+                            HookAction::Continue => {
+                                self.execute_tool(name, input.clone()).await
+                            }
                         };
 
-                        tool_results.push(result);
+                        // Fire PostToolUse hook
+                        self.fire_hook(HookEvent::PostToolUse {
+                            tool_name: name.clone(),
+                            input: input.clone(),
+                            result: tool_result.clone(),
+                        })
+                        .await?;
+
+                        let result_block = if tool_result.is_error {
+                            ContentBlock::tool_error(id, &tool_result.content)
+                        } else {
+                            ContentBlock::tool_result(id, &tool_result.content)
+                        };
+
+                        tool_results.push(result_block);
                     }
                 }
 
@@ -175,13 +263,40 @@ impl SubAgent {
             // No tool use - agent is done
             let content = response.text();
 
-            return Ok(SubAgentResult {
+            break SubAgentResult {
                 agent_id: self.agent_id.clone(),
                 content,
                 tool_use_count: self.tool_use_count,
                 usage: self.usage.clone(),
                 iterations,
-            });
+            };
+        };
+
+        // Fire AgentStop hook
+        self.fire_hook(HookEvent::AgentStop {
+            agent_id: self.agent_id.clone(),
+            result: result.clone(),
+        })
+        .await?;
+
+        Ok(result)
+    }
+
+    /// Execute a tool and return the result.
+    async fn execute_tool(
+        &self,
+        name: &str,
+        input: serde_json::Value,
+    ) -> crate::tool::ToolResult {
+        match self.tools.get(name).await {
+            Some(tool) => match tool.execute(input).await {
+                Ok(r) => r,
+                Err(e) => crate::tool::ToolResult::error(e.to_string()),
+            },
+            None => crate::tool::ToolResult::error(format!(
+                "Tool '{}' not found or not allowed",
+                name
+            )),
         }
     }
 }

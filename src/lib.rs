@@ -3,6 +3,7 @@
 
 pub mod agent;
 pub mod error;
+pub mod hook;
 pub mod llm;
 pub mod mcp;
 pub mod permission;
