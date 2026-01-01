@@ -9,7 +9,7 @@ description = "UniFFI bindings for mux"
 license = "MIT"
 
 [lib]
-crate-type = ["cdylib", "lib"]
+crate-type = ["cdylib", "staticlib", "lib"]
 name = "mux_ffi"
 
 [dependencies]
