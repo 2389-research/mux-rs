@@ -11,6 +11,7 @@ use crate::types::{
 };
 use crate::MuxFfiError;
 use mux::agent::MemoryTranscriptStore;
+use mux::hook::HookRegistry;
 use mux::llm::GeminiClient;
 use mux::prelude::{
     AgentDefinition, AnthropicClient, ContentBlock, LlmClient, McpClient, McpContentBlock,
@@ -729,7 +730,7 @@ impl MuxEngine {
     }
 
     /// Get all tools available for a workspace as ToolDefinitions for the LLM.
-    /// Includes both built-in mux tools and any connected MCP server tools.
+    /// Includes built-in mux tools, custom tools, and any connected MCP server tools.
     fn get_workspace_tools(&self, workspace_id: &str) -> Vec<ToolDefinition> {
         let mut tools = Vec::new();
 
@@ -740,6 +741,18 @@ impl MuxEngine {
                 description: tool.description().to_string(),
                 input_schema: tool.schema(),
             });
+        }
+
+        // Add custom tools registered from Swift
+        {
+            let custom_tools = self.custom_tools.read();
+            for tool in custom_tools.values() {
+                tools.push(ToolDefinition {
+                    name: tool.name().to_string(),
+                    description: tool.description().to_string(),
+                    input_schema: tool.schema(),
+                });
+            }
         }
 
         // Add MCP tools (prefixed with server name)
@@ -1076,12 +1089,39 @@ impl MuxEngine {
                 // Check if this is a built-in tool (no colon in name)
                 let builtin_tool = self.builtin_tools.iter().find(|t| t.name() == tool_name);
 
+                // Check if this is a custom tool
+                let custom_tool = self.custom_tools.read().get(&tool_name).cloned();
+
                 if let Some(tool) = builtin_tool {
                     // Execute built-in tool
                     callback.on_tool_use(ToolUseRequest {
                         id: tool_use_id.clone(),
                         tool_name: tool_name.clone(),
                         server_name: "builtin".to_string(),
+                        arguments: serde_json::to_string(&arguments).unwrap_or_default(),
+                    });
+
+                    match tool.execute(arguments).await {
+                        Ok(result) => {
+                            callback.on_tool_result(tool_use_id.clone(), result.content.clone());
+                            if result.is_error {
+                                tool_results.push(ContentBlock::tool_error(&tool_use_id, &result.content));
+                            } else {
+                                tool_results.push(ContentBlock::tool_result(&tool_use_id, &result.content));
+                            }
+                        }
+                        Err(e) => {
+                            let error_msg = format!("Tool execution failed: {}", e);
+                            callback.on_tool_result(tool_use_id.clone(), error_msg.clone());
+                            tool_results.push(ContentBlock::tool_error(&tool_use_id, &error_msg));
+                        }
+                    }
+                } else if let Some(tool) = custom_tool {
+                    // Execute custom tool from Swift
+                    callback.on_tool_use(ToolUseRequest {
+                        id: tool_use_id.clone(),
+                        tool_name: tool_name.clone(),
+                        server_name: "custom".to_string(),
                         arguments: serde_json::to_string(&arguments).unwrap_or_default(),
                     });
 
@@ -1281,6 +1321,62 @@ impl MuxEngine {
     }
 }
 
+/// A hook that proxies tool events to the SubagentCallback.
+/// This enables streaming tool use/result events to Swift during subagent execution.
+struct CallbackProxyHook {
+    agent_id: String,
+    callback: Arc<Box<dyn SubagentCallback>>,
+}
+
+impl CallbackProxyHook {
+    fn new(agent_id: String, callback: Arc<Box<dyn SubagentCallback>>) -> Self {
+        Self { agent_id, callback }
+    }
+}
+
+#[async_trait::async_trait]
+impl mux::hook::Hook for CallbackProxyHook {
+    async fn on_event(
+        &self,
+        event: &mux::hook::HookEvent,
+    ) -> Result<mux::hook::HookAction, anyhow::Error> {
+        match event {
+            mux::hook::HookEvent::PreToolUse { tool_name, input } => {
+                // Notify callback of tool use
+                self.callback.on_tool_use(
+                    self.agent_id.clone(),
+                    ToolUseRequest {
+                        id: uuid::Uuid::new_v4().to_string(),
+                        tool_name: tool_name.clone(),
+                        server_name: "builtin".to_string(),
+                        arguments: serde_json::to_string(input).unwrap_or_default(),
+                    },
+                );
+            }
+            mux::hook::HookEvent::PostToolUse {
+                tool_name: _,
+                input: _,
+                result,
+            } => {
+                // Notify callback of tool result
+                self.callback.on_tool_result(
+                    self.agent_id.clone(),
+                    "".to_string(), // tool_id not available from hook
+                    result.content.clone(),
+                );
+            }
+            _ => {
+                // Other events (AgentStart, AgentStop, Iteration) don't map to callback methods
+            }
+        }
+        Ok(mux::hook::HookAction::Continue)
+    }
+
+    fn accepts(&self, _event: &mux::hook::HookEvent) -> bool {
+        true
+    }
+}
+
 /// Subagent implementation methods.
 impl MuxEngine {
     /// Internal implementation of spawn_agent.
@@ -1290,7 +1386,7 @@ impl MuxEngine {
         agent_name: String,
         task: String,
         save_transcript: bool,
-        _callback: Arc<Box<dyn SubagentCallback>>,
+        callback: Arc<Box<dyn SubagentCallback>>,
     ) -> Result<SubagentResult, String> {
         // Get agent config
         let config = self
@@ -1328,17 +1424,51 @@ impl MuxEngine {
             registry.register_arc(tool.clone()).await;
         }
 
-        // Create agent definition from config
+        // Add custom tools to registry
+        {
+            let custom_tools = self.custom_tools.read();
+            for tool in custom_tools.values() {
+                registry.register_arc(tool.clone() as Arc<dyn Tool>).await;
+            }
+        }
+
+        // Create agent definition from config with allowed/denied tools
         let model = config
             .model
-            .unwrap_or_else(|| "claude-sonnet-4-20250514".to_string());
-        let definition = AgentDefinition::new(&agent_name, &config.system_prompt)
+            .clone()
+            .unwrap_or_else(|| DEFAULT_MODEL.to_string());
+        let mut definition = AgentDefinition::new(&agent_name, &config.system_prompt)
             .model(&model)
             .max_iterations(config.max_iterations as usize);
 
-        // Create and run subagent
+        // Apply allowed tools (empty means all allowed, so only set if non-empty)
+        if !config.allowed_tools.is_empty() {
+            definition = definition.allowed_tools(config.allowed_tools.clone());
+        }
+
+        // Apply denied tools
+        if !config.denied_tools.is_empty() {
+            definition = definition.denied_tools(config.denied_tools.clone());
+        }
+
+        // Create subagent
         let mut subagent = SubAgent::new(definition, client, registry);
         let agent_id = subagent.agent_id().to_string();
+
+        // Wire up callback via hook for tool events
+        // We always want to proxy tool events to the callback, regardless of whether
+        // a user hook handler is set
+        let hook_registry = HookRegistry::new();
+        let proxy_hook = CallbackProxyHook::new(agent_id.clone(), callback.clone());
+        hook_registry.register(proxy_hook).await;
+
+        // Note: User-provided hook handlers are stored in self.hook_handler, but
+        // we can't clone Box<dyn HookHandler> to pass to the subagent. The user's
+        // hook functionality is available via the callback interface for now.
+        // Future: Support cloneable hook handlers or use a different pattern.
+        let _ = &self.hook_handler; // Acknowledge hook_handler exists
+
+        subagent = subagent.with_hooks(Arc::new(hook_registry));
 
         let result = subagent.run(&task).await.map_err(|e| e.to_string())?;
 
@@ -1362,7 +1492,7 @@ impl MuxEngine {
     async fn do_resume_agent(
         &self,
         transcript: TranscriptData,
-        _callback: Arc<Box<dyn SubagentCallback>>,
+        callback: Arc<Box<dyn SubagentCallback>>,
     ) -> Result<SubagentResult, String> {
         // Parse transcript messages
         let messages: Vec<Message> = serde_json::from_str(&transcript.messages_json)
@@ -1396,6 +1526,14 @@ impl MuxEngine {
             registry.register_arc(tool.clone()).await;
         }
 
+        // Add custom tools to registry
+        {
+            let custom_tools = self.custom_tools.read();
+            for tool in custom_tools.values() {
+                registry.register_arc(tool.clone() as Arc<dyn Tool>).await;
+            }
+        }
+
         // Create definition for resume
         let definition = AgentDefinition::new("resumed", "You are a helpful assistant.")
             .max_iterations(10);
@@ -1408,6 +1546,12 @@ impl MuxEngine {
             registry,
             messages,
         );
+
+        // Wire up callback via hook for tool events
+        let hook_registry = HookRegistry::new();
+        let proxy_hook = CallbackProxyHook::new(transcript.agent_id.clone(), callback.clone());
+        hook_registry.register(proxy_hook).await;
+        subagent = subagent.with_hooks(Arc::new(hook_registry));
 
         let result = subagent
             .run("Continue from where you left off.")

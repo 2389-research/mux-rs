@@ -24,20 +24,29 @@ impl FfiHookBridge {
 #[async_trait]
 impl Hook for FfiHookBridge {
     async fn on_event(&self, event: &HookEvent) -> Result<HookAction, anyhow::Error> {
+        // Serialize input with proper error handling
         let ffi_event = match event {
-            HookEvent::PreToolUse { tool_name, input } => HookEventType::PreToolUse {
-                tool_name: tool_name.clone(),
-                input: serde_json::to_string(input).unwrap_or_default(),
-            },
+            HookEvent::PreToolUse { tool_name, input } => {
+                let input_json = serde_json::to_string(input)
+                    .map_err(|e| anyhow::anyhow!("Failed to serialize tool input: {}", e))?;
+                HookEventType::PreToolUse {
+                    tool_name: tool_name.clone(),
+                    input: input_json,
+                }
+            }
             HookEvent::PostToolUse {
                 tool_name,
                 input,
                 result,
-            } => HookEventType::PostToolUse {
-                tool_name: tool_name.clone(),
-                input: serde_json::to_string(input).unwrap_or_default(),
-                result: result.content.clone(),
-            },
+            } => {
+                let input_json = serde_json::to_string(input)
+                    .map_err(|e| anyhow::anyhow!("Failed to serialize tool input: {}", e))?;
+                HookEventType::PostToolUse {
+                    tool_name: tool_name.clone(),
+                    input: input_json,
+                    result: result.content.clone(),
+                }
+            }
             HookEvent::AgentStart { agent_id, task } => HookEventType::AgentStart {
                 agent_id: agent_id.clone(),
                 task: task.clone(),
@@ -54,7 +63,14 @@ impl Hook for FfiHookBridge {
             },
         };
 
-        let response = self.handler.on_event(ffi_event);
+        // Clone handler Arc to move into blocking task
+        let handler = self.handler.clone();
+
+        // Run the synchronous FFI callback on a blocking thread to avoid blocking
+        // the async runtime. This prevents deadlocks when Swift callbacks do slow work.
+        let response = tokio::task::spawn_blocking(move || handler.on_event(ffi_event))
+            .await
+            .map_err(|e| anyhow::anyhow!("Hook callback task panicked: {}", e))?;
 
         match response {
             HookResponse::Continue => Ok(HookAction::Continue),
@@ -123,6 +139,11 @@ impl Tool for FfiToolBridge {
 
     async fn execute(&self, params: serde_json::Value) -> Result<ToolResult, anyhow::Error> {
         let input = serde_json::to_string(&params)?;
+
+        // We can't move the tool into spawn_blocking since Box<dyn CustomTool> isn't Send.
+        // Instead, we execute synchronously but note that custom tool implementations
+        // should be fast. If Swift needs to do slow work, it should dispatch to its own
+        // background queue and return immediately.
         let result = self.tool.execute(input);
 
         if result.is_error {
