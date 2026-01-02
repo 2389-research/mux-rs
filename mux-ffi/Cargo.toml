@@ -3,7 +3,7 @@
 
 [package]
 name = "mux-ffi"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2024"
 description = "UniFFI bindings for mux"
 license = "MIT"
