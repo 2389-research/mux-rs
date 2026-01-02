@@ -775,13 +775,21 @@ impl MuxEngine {
         if self.subagent_event_handler.read().is_some() {
             tools.push(ToolDefinition {
                 name: "task".to_string(),
-                description: "Spawn a subagent to handle a specific task. Use this to delegate work to specialized agents.".to_string(),
+                description: "Spawn a subagent to handle a specific task. Use a registered agent_type OR provide a custom system_prompt for ad-hoc agents.".to_string(),
                 input_schema: serde_json::json!({
                     "type": "object",
                     "properties": {
                         "agent_type": {
                             "type": "string",
-                            "description": "The type of agent to spawn (must be registered in the agent registry)"
+                            "description": "The type of agent to spawn (must be registered). Mutually exclusive with system_prompt."
+                        },
+                        "system_prompt": {
+                            "type": "string",
+                            "description": "Custom system prompt for an ad-hoc agent. Use this instead of agent_type for one-off specialized tasks."
+                        },
+                        "model": {
+                            "type": "string",
+                            "description": "Model to use for ad-hoc agents (e.g., 'claude-opus-4-20250514'). Only used with system_prompt."
                         },
                         "task": {
                             "type": "string",
@@ -796,7 +804,7 @@ impl MuxEngine {
                             "description": "Optional: ID of a previous agent to resume from its transcript"
                         }
                     },
-                    "required": ["agent_type", "task", "description"]
+                    "required": ["task", "description"]
                 }),
             });
         }

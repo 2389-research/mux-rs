@@ -6,7 +6,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use crate::callback::SubagentEventHandler;
-use mux::agent::{AgentRegistry, SubAgent, TranscriptStore};
+use mux::agent::{AgentDefinition, AgentRegistry, SubAgent, TranscriptStore};
 use mux::hook::{Hook, HookAction, HookEvent, HookRegistry};
 use mux::llm::LlmClient;
 use mux::tool::{Registry, Tool, ToolResult};
@@ -129,8 +129,8 @@ impl Tool for FfiTaskTool {
     }
 
     fn description(&self) -> &str {
-        "Spawn a subagent to handle a specific task. Use this to delegate work to specialized agents. \
-         Optionally resume from a previous agent's transcript."
+        "Spawn a subagent to handle a specific task. Use a registered agent_type OR provide a custom \
+         system_prompt for ad-hoc agents. Optionally resume from a previous transcript."
     }
 
     fn schema(&self) -> serde_json::Value {
@@ -139,7 +139,15 @@ impl Tool for FfiTaskTool {
             "properties": {
                 "agent_type": {
                     "type": "string",
-                    "description": "The type of agent to spawn (must be registered in the agent registry)"
+                    "description": "The type of agent to spawn (must be registered). Mutually exclusive with system_prompt."
+                },
+                "system_prompt": {
+                    "type": "string",
+                    "description": "Custom system prompt for an ad-hoc agent. Use this instead of agent_type for one-off specialized tasks."
+                },
+                "model": {
+                    "type": "string",
+                    "description": "Model to use for ad-hoc agents (e.g., 'claude-opus-4-20250514'). Only used with system_prompt."
                 },
                 "task": {
                     "type": "string",
@@ -154,17 +162,12 @@ impl Tool for FfiTaskTool {
                     "description": "Optional: ID of a previous agent to resume from its transcript"
                 }
             },
-            "required": ["agent_type", "task", "description"]
+            "required": ["task", "description"]
         })
     }
 
     async fn execute(&self, params: serde_json::Value) -> Result<ToolResult, anyhow::Error> {
-        // Parse parameters
-        let agent_type = params
-            .get("agent_type")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("Missing required parameter: agent_type"))?;
-
+        // Parse required parameters
         let task = params
             .get("task")
             .and_then(|v| v.as_str())
@@ -177,17 +180,34 @@ impl Tool for FfiTaskTool {
 
         let resume_agent_id = params.get("resume_agent_id").and_then(|v| v.as_str());
 
-        // Get agent definition
-        let definition = match self.agent_registry.get(agent_type).await {
-            Some(def) => def,
-            None => {
-                let available = self.agent_registry.list().await;
-                return Ok(ToolResult::error(format!(
-                    "Agent type '{}' not found. Available types: {}",
-                    agent_type,
-                    available.join(", ")
-                )));
+        // Parse optional parameters for registered vs ad-hoc agents
+        let agent_type = params.get("agent_type").and_then(|v| v.as_str());
+        let system_prompt = params.get("system_prompt").and_then(|v| v.as_str());
+        let model_param = params.get("model").and_then(|v| v.as_str());
+
+        // Get or create agent definition
+        let (definition, agent_type_name) = if let Some(agent_type) = agent_type {
+            // Use registered agent
+            match self.agent_registry.get(agent_type).await {
+                Some(def) => (def, agent_type.to_string()),
+                None => {
+                    let available = self.agent_registry.list().await;
+                    return Ok(ToolResult::error(format!(
+                        "Agent type '{}' not found. Available types: {}",
+                        agent_type,
+                        available.join(", ")
+                    )));
+                }
             }
+        } else if let Some(prompt) = system_prompt {
+            // Create ad-hoc agent
+            let model = model_param.unwrap_or("claude-sonnet-4-20250514");
+            let def = AgentDefinition::new("adhoc", prompt).model(model);
+            (def, "adhoc".to_string())
+        } else {
+            return Ok(ToolResult::error(
+                "Must provide either 'agent_type' (registered agent) or 'system_prompt' (ad-hoc agent)",
+            ));
         };
 
         // Determine which model/client to use
@@ -239,12 +259,12 @@ impl Tool for FfiTaskTool {
         {
             let handler = self.event_handler.clone();
             let agent_id_clone = agent_id.clone();
-            let agent_type = agent_type.to_string();
+            let agent_type_clone = agent_type_name.clone();
             let task_clone = task.to_string();
             let description = description.to_string();
 
             tokio::task::spawn_blocking(move || {
-                handler.on_agent_started(agent_id_clone, agent_type, task_clone, description);
+                handler.on_agent_started(agent_id_clone, agent_type_clone, task_clone, description);
             })
             .await
             .ok();
