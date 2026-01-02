@@ -39,6 +39,7 @@ pub fn version() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::AgentConfig;
 
     #[test]
     fn test_version() {
@@ -105,5 +106,53 @@ mod tests {
 
         // Cleanup
         engine.delete_workspace(ws.id).unwrap();
+    }
+
+    #[test]
+    fn test_agent_registration() {
+        let engine = MuxEngine::new("/tmp/mux-test-agents".to_string()).unwrap();
+
+        // Register agent
+        let config = AgentConfig::new(
+            "researcher".to_string(),
+            "You are a research assistant.".to_string(),
+        );
+        engine.register_agent(config).unwrap();
+
+        // List agents
+        let agents = engine.list_agents();
+        assert!(agents.contains(&"researcher".to_string()));
+
+        // Unregister
+        engine.unregister_agent("researcher".to_string()).unwrap();
+        assert!(engine.list_agents().is_empty());
+    }
+
+    #[test]
+    fn test_provider_config() {
+        let engine = MuxEngine::new("/tmp/mux-test-providers".to_string()).unwrap();
+
+        // Set provider config
+        engine.set_provider_config(Provider::Anthropic, "sk-test".to_string(), None);
+        engine.set_provider_config(
+            Provider::OpenAI,
+            "sk-openai".to_string(),
+            Some("https://api.openai.com".to_string()),
+        );
+
+        // Verify
+        assert_eq!(engine.get_api_key(Provider::Anthropic), Some("sk-test".to_string()));
+        assert_eq!(engine.get_api_key(Provider::OpenAI), Some("sk-openai".to_string()));
+
+        // Set default
+        engine.set_default_provider(Provider::Gemini);
+        assert_eq!(engine.get_default_provider(), Provider::Gemini);
+    }
+
+    #[test]
+    fn test_unregister_nonexistent_agent() {
+        let engine = MuxEngine::new("/tmp/mux-test-unreg".to_string()).unwrap();
+        let result = engine.unregister_agent("nonexistent".to_string());
+        assert!(result.is_err());
     }
 }
