@@ -3,14 +3,16 @@
 
 use crate::bridge::FfiToolBridge;
 use crate::callback::{
-    ChatCallback, ChatResult, CustomTool, HookHandler, SubagentCallback, ToolUseRequest,
+    ChatCallback, ChatResult, CustomTool, HookHandler, SubagentCallback, SubagentEventHandler,
+    ToolUseRequest,
 };
+use crate::task_tool::FfiTaskTool;
 use crate::types::{
     AgentConfig, ApprovalDecision, Conversation, McpServerConfig, McpTransportType, Provider,
     SubagentResult, TranscriptData, Workspace, WorkspaceSummary,
 };
 use crate::MuxFfiError;
-use mux::agent::MemoryTranscriptStore;
+use mux::agent::{AgentRegistry, MemoryTranscriptStore};
 use mux::hook::HookRegistry;
 use mux::llm::GeminiClient;
 use mux::prelude::{
@@ -88,6 +90,8 @@ pub struct MuxEngine {
     transcript_store: Arc<MemoryTranscriptStore>,
     /// Default provider for new workspaces
     default_provider: Arc<RwLock<Provider>>,
+    /// Subagent event handler for TaskTool events
+    subagent_event_handler: Arc<RwLock<Option<Box<dyn SubagentEventHandler>>>>,
 }
 
 #[uniffi::export]
@@ -134,6 +138,7 @@ impl MuxEngine {
             custom_tools: Arc::new(RwLock::new(HashMap::new())),
             transcript_store: MemoryTranscriptStore::shared(),
             default_provider: Arc::new(RwLock::new(Provider::Anthropic)),
+            subagent_event_handler: Arc::new(RwLock::new(None)),
         }))
     }
 
@@ -358,6 +363,17 @@ impl MuxEngine {
     /// Clear the current hook handler
     pub fn clear_hook_handler(&self) {
         *self.hook_handler.write() = None;
+    }
+
+    /// Set the subagent event handler for TaskTool events.
+    /// This handler receives streaming updates when subagents are spawned.
+    pub fn set_subagent_event_handler(&self, handler: Box<dyn SubagentEventHandler>) {
+        *self.subagent_event_handler.write() = Some(handler);
+    }
+
+    /// Clear the current subagent event handler.
+    pub fn clear_subagent_event_handler(&self) {
+        *self.subagent_event_handler.write() = None;
     }
 
     /// Register a custom tool from Swift
@@ -755,6 +771,36 @@ impl MuxEngine {
             }
         }
 
+        // Add TaskTool if subagent event handler is registered
+        if self.subagent_event_handler.read().is_some() {
+            tools.push(ToolDefinition {
+                name: "task".to_string(),
+                description: "Spawn a subagent to handle a specific task. Use this to delegate work to specialized agents.".to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "agent_type": {
+                            "type": "string",
+                            "description": "The type of agent to spawn (must be registered in the agent registry)"
+                        },
+                        "task": {
+                            "type": "string",
+                            "description": "The task description to give to the subagent"
+                        },
+                        "description": {
+                            "type": "string",
+                            "description": "A short (3-5 word) description of what the agent will do"
+                        },
+                        "resume_agent_id": {
+                            "type": "string",
+                            "description": "Optional: ID of a previous agent to resume from its transcript"
+                        }
+                    },
+                    "required": ["agent_type", "task", "description"]
+                }),
+            });
+        }
+
         // Add MCP tools (prefixed with server name)
         let clients = self.mcp_clients.read();
         if let Some(workspace_clients) = clients.get(workspace_id) {
@@ -1140,6 +1186,30 @@ impl MuxEngine {
                             tool_results.push(ContentBlock::tool_error(&tool_use_id, &error_msg));
                         }
                     }
+                } else if tool_name == "task" {
+                    // Execute TaskTool for spawning subagents
+                    callback.on_tool_use(ToolUseRequest {
+                        id: tool_use_id.clone(),
+                        tool_name: tool_name.clone(),
+                        server_name: "builtin".to_string(),
+                        arguments: serde_json::to_string(&arguments).unwrap_or_default(),
+                    });
+
+                    match self.execute_task_tool(arguments.clone()).await {
+                        Ok(result) => {
+                            callback.on_tool_result(tool_use_id.clone(), result.content.clone());
+                            if result.is_error {
+                                tool_results.push(ContentBlock::tool_error(&tool_use_id, &result.content));
+                            } else {
+                                tool_results.push(ContentBlock::tool_result(&tool_use_id, &result.content));
+                            }
+                        }
+                        Err(e) => {
+                            let error_msg = format!("TaskTool execution failed: {}", e);
+                            callback.on_tool_result(tool_use_id.clone(), error_msg.clone());
+                            tool_results.push(ContentBlock::tool_error(&tool_use_id, &error_msg));
+                        }
+                    }
                 } else if let Some((server_name, mcp_tool_name)) = self.parse_tool_name(&tool_name) {
                     // Execute MCP tool (server:tool format)
                     callback.on_tool_use(ToolUseRequest {
@@ -1225,6 +1295,167 @@ impl MuxEngine {
             input_tokens: total_input_tokens,
             output_tokens: total_output_tokens,
         })
+    }
+
+    /// Execute the TaskTool to spawn a subagent.
+    /// This creates an FfiTaskTool with the current engine state and event handler.
+    async fn execute_task_tool(
+        &self,
+        params: serde_json::Value,
+    ) -> Result<mux::tool::ToolResult, String> {
+        // Check if handler is set (required for TaskTool)
+        if self.subagent_event_handler.read().is_none() {
+            return Ok(mux::tool::ToolResult::error(
+                "TaskTool not available: no subagent event handler registered",
+            ));
+        }
+
+        // Build AgentRegistry from registered agent configs
+        let agent_registry = AgentRegistry::new();
+        {
+            let configs = self.agent_configs.read();
+            for (name, config) in configs.iter() {
+                let model = config
+                    .model
+                    .clone()
+                    .unwrap_or_else(|| DEFAULT_MODEL.to_string());
+
+                let mut definition = AgentDefinition::new(name, &config.system_prompt)
+                    .model(&model)
+                    .max_iterations(config.max_iterations as usize);
+
+                if !config.allowed_tools.is_empty() {
+                    definition = definition.allowed_tools(config.allowed_tools.clone());
+                }
+                if !config.denied_tools.is_empty() {
+                    definition = definition.denied_tools(config.denied_tools.clone());
+                }
+
+                agent_registry.register(definition).await;
+            }
+        }
+
+        // Build tool registry with builtin + custom tools
+        let tool_registry = Registry::new();
+        for tool in &self.builtin_tools {
+            tool_registry.register_arc(tool.clone()).await;
+        }
+        {
+            let custom_tools = self.custom_tools.read();
+            for tool in custom_tools.values() {
+                tool_registry
+                    .register_arc(tool.clone() as Arc<dyn Tool>)
+                    .await;
+            }
+        }
+
+        // Get provider config for client factory
+        let provider = self.default_provider.read().clone();
+        let provider_config = self
+            .api_keys
+            .read()
+            .get(&provider)
+            .cloned()
+            .ok_or_else(|| format!("Provider not configured: {:?}", provider))?;
+
+        // Clone what we need for the client factory closure
+        let provider_clone = provider.clone();
+        let api_key = provider_config.api_key.clone();
+        let base_url = provider_config.base_url.clone();
+
+        // Create client factory
+        let client_factory = move |_model: &str| -> Arc<dyn LlmClient> {
+            match provider_clone {
+                Provider::Anthropic => Arc::new(AnthropicClient::new(&api_key)),
+                Provider::OpenAI | Provider::Ollama => {
+                    let mut c = OpenAIClient::new(&api_key);
+                    if let Some(ref url) = base_url {
+                        c = c.with_base_url(url);
+                    }
+                    Arc::new(c)
+                }
+                Provider::Gemini => Arc::new(GeminiClient::new(&api_key)),
+            }
+        };
+
+        // Get the event handler - we need to clone it for FfiTaskTool
+        // Since Box<dyn SubagentEventHandler> isn't Clone, we need a workaround.
+        // For now, we'll create a simple proxy that forwards to the stored handler.
+        let handler_proxy = TaskToolEventProxy {
+            engine_handler: self.subagent_event_handler.clone(),
+        };
+
+        let task_tool = FfiTaskTool::new(
+            agent_registry,
+            tool_registry,
+            client_factory,
+            Box::new(handler_proxy),
+        )
+        .with_transcript_store(self.transcript_store.clone());
+
+        task_tool.execute(params).await.map_err(|e| e.to_string())
+    }
+}
+
+/// Proxy that forwards SubagentEventHandler calls to the engine's stored handler.
+struct TaskToolEventProxy {
+    engine_handler: Arc<RwLock<Option<Box<dyn SubagentEventHandler>>>>,
+}
+
+impl SubagentEventHandler for TaskToolEventProxy {
+    fn on_agent_started(
+        &self,
+        subagent_id: String,
+        agent_type: String,
+        task: String,
+        description: String,
+    ) {
+        if let Some(handler) = self.engine_handler.read().as_ref() {
+            handler.on_agent_started(subagent_id, agent_type, task, description);
+        }
+    }
+
+    fn on_tool_use(&self, subagent_id: String, tool_name: String, arguments_json: String) {
+        if let Some(handler) = self.engine_handler.read().as_ref() {
+            handler.on_tool_use(subagent_id, tool_name, arguments_json);
+        }
+    }
+
+    fn on_tool_result(
+        &self,
+        subagent_id: String,
+        tool_name: String,
+        result: String,
+        is_error: bool,
+    ) {
+        if let Some(handler) = self.engine_handler.read().as_ref() {
+            handler.on_tool_result(subagent_id, tool_name, result, is_error);
+        }
+    }
+
+    fn on_iteration(&self, subagent_id: String, iteration: u32) {
+        if let Some(handler) = self.engine_handler.read().as_ref() {
+            handler.on_iteration(subagent_id, iteration);
+        }
+    }
+
+    fn on_agent_completed(
+        &self,
+        subagent_id: String,
+        content: String,
+        tool_use_count: u32,
+        iterations: u32,
+        transcript_saved: bool,
+    ) {
+        if let Some(handler) = self.engine_handler.read().as_ref() {
+            handler.on_agent_completed(subagent_id, content, tool_use_count, iterations, transcript_saved);
+        }
+    }
+
+    fn on_agent_error(&self, subagent_id: String, error: String) {
+        if let Some(handler) = self.engine_handler.read().as_ref() {
+            handler.on_agent_error(subagent_id, error);
+        }
     }
 }
 

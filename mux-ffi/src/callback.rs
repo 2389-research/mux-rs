@@ -88,3 +88,41 @@ pub trait CustomTool: Send + Sync {
     /// Executes the tool with the given JSON input and returns the result.
     fn execute(&self, input_json: String) -> ToolExecutionResult;
 }
+
+/// Event handler for TaskTool-spawned subagents during chat.
+/// Swift implements this to receive streaming updates when the main agent
+/// spawns subagents via the TaskTool. Events fire during the parent's
+/// tool execution, before the tool result is returned.
+#[uniffi::export(callback_interface)]
+pub trait SubagentEventHandler: Send + Sync {
+    /// Called when a subagent is spawned by the TaskTool.
+    fn on_agent_started(
+        &self,
+        subagent_id: String,
+        agent_type: String,
+        task: String,
+        description: String,
+    );
+
+    /// Called when the subagent uses a tool.
+    fn on_tool_use(&self, subagent_id: String, tool_name: String, arguments_json: String);
+
+    /// Called when a tool execution completes.
+    fn on_tool_result(&self, subagent_id: String, tool_name: String, result: String, is_error: bool);
+
+    /// Called when the subagent completes an iteration of its think-act loop.
+    fn on_iteration(&self, subagent_id: String, iteration: u32);
+
+    /// Called when the subagent completes successfully.
+    fn on_agent_completed(
+        &self,
+        subagent_id: String,
+        content: String,
+        tool_use_count: u32,
+        iterations: u32,
+        transcript_saved: bool,
+    );
+
+    /// Called when the subagent encounters an error.
+    fn on_agent_error(&self, subagent_id: String, error: String);
+}
