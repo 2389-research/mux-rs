@@ -16,6 +16,16 @@ pub use callback::*;
 pub enum MuxFfiError {
     #[error("Engine error: {message}")]
     Engine { message: String },
+    #[error("Agent not found: {name}")]
+    AgentNotFound { name: String },
+    #[error("Tool not found: {name}")]
+    ToolNotFound { name: String },
+    #[error("Provider not configured: {provider}")]
+    ProviderNotConfigured { provider: String },
+    #[error("Invalid transcript: {reason}")]
+    TranscriptInvalid { reason: String },
+    #[error("Hook failed: {reason}")]
+    HookFailed { reason: String },
 }
 
 #[uniffi::export]
