@@ -8,6 +8,8 @@ use uuid::Uuid;
 pub enum Provider {
     Anthropic,
     OpenAI,
+    Gemini,
+    Ollama,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, uniffi::Record)]
@@ -142,4 +144,73 @@ pub enum ApprovalDecision {
     Allow,
     AlwaysAllow,
     Deny,
+}
+
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct AgentConfig {
+    pub name: String,
+    pub system_prompt: String,
+    pub model: Option<String>,
+    pub allowed_tools: Vec<String>,
+    pub denied_tools: Vec<String>,
+    pub max_iterations: u32,
+}
+
+impl AgentConfig {
+    pub fn new(name: String, system_prompt: String) -> Self {
+        Self {
+            name,
+            system_prompt,
+            model: None,
+            allowed_tools: Vec::new(),
+            denied_tools: Vec::new(),
+            max_iterations: 10,
+        }
+    }
+}
+
+#[derive(Debug, Clone, uniffi::Enum)]
+pub enum HookEventType {
+    PreToolUse { tool_name: String, input: String },
+    PostToolUse { tool_name: String, input: String, result: String },
+    AgentStart { agent_id: String, task: String },
+    AgentStop { agent_id: String },
+    Iteration { agent_id: String, iteration: u32 },
+}
+
+#[derive(Debug, Clone, uniffi::Enum)]
+pub enum HookResponse {
+    Continue,
+    Block { reason: String },
+    Transform { new_input: String },
+}
+
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct TranscriptData {
+    pub agent_id: String,
+    pub messages_json: String,
+}
+
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct SubagentResult {
+    pub agent_id: String,
+    pub content: String,
+    pub tool_use_count: u32,
+    pub iterations: u32,
+    pub transcript_json: Option<String>,
+}
+
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct ToolExecutionResult {
+    pub content: String,
+    pub is_error: bool,
+}
+
+impl ToolExecutionResult {
+    pub fn success(content: String) -> Self {
+        Self { content, is_error: false }
+    }
+    pub fn error(content: String) -> Self {
+        Self { content, is_error: true }
+    }
 }
