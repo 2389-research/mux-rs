@@ -197,7 +197,7 @@ async fn main() -> Result<()> {
     for config in configs {
         let name = config.name.clone();
         match McpClient::connect(config).await {
-            Ok(client) => {
+            Ok(mut client) => {
                 if let Err(e) = client.initialize().await {
                     eprintln!("Warning: Failed to initialize {}: {}", name, e);
                     continue;
