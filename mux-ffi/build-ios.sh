@@ -31,6 +31,11 @@ uniffi-bindgen generate \
   --language swift \
   --out-dir mux-ffi/bindings
 
+echo "==> Renaming modulemap for SwiftPM compatibility..."
+if [ -f "mux-ffi/bindings/MuxFFIFFI.modulemap" ]; then
+  mv mux-ffi/bindings/MuxFFIFFI.modulemap mux-ffi/bindings/module.modulemap
+fi
+
 OUTPUT_DIR="${1:-../poka/MuxFFI}"
 mkdir -p "$OUTPUT_DIR"
 
