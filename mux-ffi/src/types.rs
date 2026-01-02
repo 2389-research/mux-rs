@@ -42,6 +42,9 @@ pub struct Workspace {
     pub path: Option<String>,
     pub llm_config: Option<LlmConfig>,
     pub mcp_servers: Vec<McpServerConfig>,
+    /// Custom system prompt for this workspace. If None, a default is used.
+    /// Tool guidance is automatically appended to whatever prompt is set.
+    pub system_prompt: Option<String>,
 }
 
 impl Workspace {
@@ -52,6 +55,7 @@ impl Workspace {
             path,
             llm_config: None,
             mcp_servers: Vec::new(),
+            system_prompt: None,
         }
     }
 }

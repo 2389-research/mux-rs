@@ -1,5 +1,5 @@
 // ABOUTME: UniFFI bindings for mux - exposes Rust agentic library to Swift/Kotlin.
-// ABOUTME: This crate provides the BuddyEngine interface for GUI applications.
+// ABOUTME: This crate provides the MuxEngine interface for GUI applications.
 
 uniffi::setup_scaffolding!();
 
@@ -48,13 +48,13 @@ mod tests {
 
     #[test]
     fn test_engine_creation() {
-        let engine = BuddyEngine::new("/tmp/buddy-test".to_string()).unwrap();
+        let engine = MuxEngine::new("/tmp/mux-test".to_string()).unwrap();
         assert!(engine.list_workspaces().is_empty());
     }
 
     #[test]
     fn test_workspace_crud() {
-        let engine = BuddyEngine::new("/tmp/buddy-test-crud".to_string()).unwrap();
+        let engine = MuxEngine::new("/tmp/mux-test-crud".to_string()).unwrap();
 
         // Create
         let ws = engine.create_workspace("Test Project".to_string(), None).unwrap();
@@ -67,5 +67,30 @@ mod tests {
         // Delete
         engine.delete_workspace(ws.id.clone()).unwrap();
         assert!(engine.list_workspaces().is_empty());
+    }
+
+    #[test]
+    fn test_system_prompt() {
+        let engine = MuxEngine::new("/tmp/mux-test-prompt".to_string()).unwrap();
+        let ws = engine.create_workspace("Prompt Test".to_string(), None).unwrap();
+
+        // Default is None
+        assert!(engine.get_system_prompt(ws.id.clone()).is_none());
+
+        // Set custom prompt
+        engine
+            .set_system_prompt(ws.id.clone(), Some("You are a pirate assistant.".to_string()))
+            .unwrap();
+        assert_eq!(
+            engine.get_system_prompt(ws.id.clone()),
+            Some("You are a pirate assistant.".to_string())
+        );
+
+        // Reset to default
+        engine.set_system_prompt(ws.id.clone(), None).unwrap();
+        assert!(engine.get_system_prompt(ws.id.clone()).is_none());
+
+        // Cleanup
+        engine.delete_workspace(ws.id).unwrap();
     }
 }

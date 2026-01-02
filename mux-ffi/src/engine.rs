@@ -1,4 +1,4 @@
-// ABOUTME: BuddyEngine - the main entry point for the FFI layer.
+// ABOUTME: MuxEngine - the main entry point for the FFI layer.
 // ABOUTME: Manages workspaces, conversations, and bridges to mux core.
 
 use crate::callback::{ChatCallback, ChatResult, ToolUseRequest};
@@ -46,7 +46,7 @@ struct McpClientHandle {
 }
 
 #[derive(uniffi::Object)]
-pub struct BuddyEngine {
+pub struct MuxEngine {
     data_dir: PathBuf,
     workspaces: Arc<RwLock<HashMap<String, Workspace>>>,
     conversations: Arc<RwLock<HashMap<String, Vec<Conversation>>>>,
@@ -68,7 +68,7 @@ pub struct BuddyEngine {
 }
 
 #[uniffi::export]
-impl BuddyEngine {
+impl MuxEngine {
     #[uniffi::constructor]
     pub fn new(data_dir: String) -> Result<Arc<Self>, MuxFfiError> {
         let path = PathBuf::from(&data_dir);
@@ -234,6 +234,37 @@ impl BuddyEngine {
             .get(&workspace_id)
             .cloned()
             .unwrap_or_default()
+    }
+
+    /// Set a custom system prompt for a workspace.
+    /// Tool guidance is automatically appended to this prompt.
+    /// Pass None to reset to the default prompt.
+    pub fn set_system_prompt(
+        &self,
+        workspace_id: String,
+        prompt: Option<String>,
+    ) -> Result<(), MuxFfiError> {
+        let mut workspaces = self.workspaces.write();
+        let workspace = workspaces.get_mut(&workspace_id).ok_or_else(|| {
+            MuxFfiError::Engine {
+                message: format!("Workspace not found: {}", workspace_id),
+            }
+        })?;
+
+        workspace.system_prompt = prompt;
+        drop(workspaces);
+
+        self.save_workspaces();
+        Ok(())
+    }
+
+    /// Get the current system prompt for a workspace.
+    /// Returns None if using the default prompt.
+    pub fn get_system_prompt(&self, workspace_id: String) -> Option<String> {
+        self.workspaces
+            .read()
+            .get(&workspace_id)
+            .and_then(|ws| ws.system_prompt.clone())
     }
 
     pub fn set_api_key(&self, provider: Provider, key: String) {
@@ -414,7 +445,7 @@ impl BuddyEngine {
 }
 
 /// MCP client management methods
-impl BuddyEngine {
+impl MuxEngine {
     /// Connect to all enabled MCP servers for a workspace.
     async fn do_connect_workspace_servers(&self, workspace_id: String) -> Result<(), String> {
         // Get enabled MCP server configs for this workspace
@@ -604,7 +635,7 @@ impl BuddyEngine {
     }
 }
 
-impl BuddyEngine {
+impl MuxEngine {
     /// Get the configured model for a conversation's workspace
     fn get_model_for_conversation(&self, conversation_id: &str) -> Option<String> {
         // Find workspace for this conversation
@@ -766,12 +797,17 @@ impl BuddyEngine {
             };
 
             // Build system prompt with tool guidance
-            let workspace_path = workspace_id
+            let (workspace_path, custom_prompt) = workspace_id
                 .as_ref()
                 .and_then(|ws_id| {
-                    self.workspaces.read().get(ws_id).and_then(|ws| ws.path.clone())
+                    self.workspaces.read().get(ws_id).map(|ws| {
+                        (
+                            ws.path.clone().unwrap_or_else(|| "~".to_string()),
+                            ws.system_prompt.clone(),
+                        )
+                    })
                 })
-                .unwrap_or_else(|| "~".to_string());
+                .unwrap_or_else(|| ("~".to_string(), None));
 
             let tool_list: String = tools
                 .iter()
@@ -779,13 +815,18 @@ impl BuddyEngine {
                 .collect::<Vec<_>>()
                 .join("\n");
 
+            // Use custom prompt if set, otherwise use default
+            let base_prompt = custom_prompt.unwrap_or_else(|| {
+                "You are a helpful AI assistant with access to local tools.".to_string()
+            });
+
             let system_prompt = format!(
-                "You are BuddyAgent, a helpful AI assistant with access to local tools.\n\n\
+                "{}\n\n\
                 Available tools:\n{}\n\n\
                 IMPORTANT: When using file tools, always use ABSOLUTE paths (starting with / or ~).\n\
                 The workspace directory is: {}\n\
-                For example, use '{}/file.txt' instead of just 'file.txt'.\n\n\
-                Be helpful, concise, and use tools when appropriate to complete tasks.",
+                For example, use '{}/file.txt' instead of just 'file.txt'.",
+                base_prompt,
                 tool_list,
                 workspace_path,
                 workspace_path
@@ -970,7 +1011,7 @@ impl BuddyEngine {
 }
 
 /// Persistence helper methods
-impl BuddyEngine {
+impl MuxEngine {
     /// Load workspaces from disk. Returns empty HashMap if file doesn't exist or is invalid.
     fn load_workspaces(data_dir: &PathBuf) -> HashMap<String, Workspace> {
         let path = data_dir.join(WORKSPACES_FILE);
