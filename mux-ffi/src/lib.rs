@@ -12,6 +12,9 @@ pub use engine::*;
 mod callback;
 pub use callback::*;
 
+mod bridge;
+pub use bridge::*;
+
 #[derive(Debug, thiserror::Error, uniffi::Error)]
 pub enum MuxFfiError {
     #[error("Engine error: {message}")]
