@@ -1,12 +1,14 @@
 // ABOUTME: MuxEngine - the main entry point for the FFI layer.
 // ABOUTME: Manages workspaces, conversations, and bridges to mux core.
 
-use crate::callback::{ChatCallback, ChatResult, ToolUseRequest};
+use crate::bridge::FfiToolBridge;
+use crate::callback::{ChatCallback, ChatResult, CustomTool, HookHandler, ToolUseRequest};
 use crate::types::{
-    ApprovalDecision, Conversation, McpServerConfig, McpTransportType, Provider, Workspace,
-    WorkspaceSummary,
+    AgentConfig, ApprovalDecision, Conversation, McpServerConfig, McpTransportType, Provider,
+    Workspace, WorkspaceSummary,
 };
 use crate::MuxFfiError;
+use mux::agent::MemoryTranscriptStore;
 use mux::prelude::{
     AnthropicClient, ContentBlock, LlmClient, McpClient, McpContentBlock,
     McpServerConfig as MuxMcpServerConfig, McpToolInfo, McpTransport, Message, Request, Role,
@@ -22,6 +24,13 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::runtime::Runtime;
 use tokio::sync::Mutex as TokioMutex;
+
+/// Internal configuration for a provider
+#[derive(Clone)]
+struct ProviderConfig {
+    api_key: String,
+    base_url: Option<String>,
+}
 
 /// Stored message for conversation history
 #[derive(Clone, Serialize, Deserialize)]
@@ -57,7 +66,7 @@ pub struct MuxEngine {
     /// persist keys securely (e.g., Keychain) and call set_api_key on each launch.
     /// NOTE: Currently only Anthropic provider is supported for chat. OpenAI support
     /// is planned but not yet implemented.
-    api_keys: Arc<RwLock<HashMap<Provider, String>>>,
+    api_keys: Arc<RwLock<HashMap<Provider, ProviderConfig>>>,
     /// Connected MCP clients, keyed by workspace_id -> server_name -> handle
     mcp_clients: Arc<RwLock<HashMap<String, HashMap<String, McpClientHandle>>>>,
     /// Pending tool approval requests, keyed by tool_use_id -> oneshot sender
@@ -65,6 +74,16 @@ pub struct MuxEngine {
         Arc<RwLock<HashMap<String, tokio::sync::oneshot::Sender<ApprovalDecision>>>>,
     /// Built-in tools from mux (always available)
     builtin_tools: Vec<Arc<dyn Tool>>,
+    /// Registered agent configurations
+    agent_configs: Arc<RwLock<HashMap<String, AgentConfig>>>,
+    /// Hook handler (optional)
+    hook_handler: Arc<RwLock<Option<Box<dyn HookHandler>>>>,
+    /// Custom tools registered from Swift
+    custom_tools: Arc<RwLock<HashMap<String, Arc<FfiToolBridge>>>>,
+    /// Transcript storage for resume capability
+    transcript_store: Arc<MemoryTranscriptStore>,
+    /// Default provider for new workspaces
+    default_provider: Arc<RwLock<Provider>>,
 }
 
 #[uniffi::export]
@@ -106,6 +125,11 @@ impl MuxEngine {
             mcp_clients: Arc::new(RwLock::new(HashMap::new())),
             pending_approvals: Arc::new(RwLock::new(HashMap::new())),
             builtin_tools,
+            agent_configs: Arc::new(RwLock::new(HashMap::new())),
+            hook_handler: Arc::new(RwLock::new(None)),
+            custom_tools: Arc::new(RwLock::new(HashMap::new())),
+            transcript_store: MemoryTranscriptStore::shared(),
+            default_provider: Arc::new(RwLock::new(Provider::Anthropic)),
         }))
     }
 
@@ -268,13 +292,89 @@ impl MuxEngine {
     }
 
     pub fn set_api_key(&self, provider: Provider, key: String) {
-        // Store API key in thread-safe storage
-        self.api_keys.write().insert(provider, key);
+        // Store API key in thread-safe storage using set_provider_config
+        self.set_provider_config(provider, key, None);
     }
 
     /// Get stored API key for a provider
     pub fn get_api_key(&self, provider: Provider) -> Option<String> {
-        self.api_keys.read().get(&provider).cloned()
+        self.api_keys
+            .read()
+            .get(&provider)
+            .map(|config| config.api_key.clone())
+    }
+
+    /// Set provider configuration with API key and optional base URL
+    pub fn set_provider_config(
+        &self,
+        provider: Provider,
+        api_key: String,
+        base_url: Option<String>,
+    ) {
+        self.api_keys
+            .write()
+            .insert(provider, ProviderConfig { api_key, base_url });
+    }
+
+    /// Set the default provider for new workspaces
+    pub fn set_default_provider(&self, provider: Provider) {
+        *self.default_provider.write() = provider;
+    }
+
+    /// Get the current default provider
+    pub fn get_default_provider(&self) -> Provider {
+        self.default_provider.read().clone()
+    }
+
+    /// Register an agent configuration
+    pub fn register_agent(&self, config: AgentConfig) -> Result<(), MuxFfiError> {
+        let name = config.name.clone();
+        self.agent_configs.write().insert(name, config);
+        Ok(())
+    }
+
+    /// List all registered agent names
+    pub fn list_agents(&self) -> Vec<String> {
+        self.agent_configs.read().keys().cloned().collect()
+    }
+
+    /// Unregister an agent by name
+    pub fn unregister_agent(&self, name: String) -> Result<(), MuxFfiError> {
+        if self.agent_configs.write().remove(&name).is_none() {
+            return Err(MuxFfiError::AgentNotFound { name });
+        }
+        Ok(())
+    }
+
+    /// Set the hook handler for intercepting lifecycle events
+    pub fn set_hook_handler(&self, handler: Box<dyn HookHandler>) {
+        *self.hook_handler.write() = Some(handler);
+    }
+
+    /// Clear the current hook handler
+    pub fn clear_hook_handler(&self) {
+        *self.hook_handler.write() = None;
+    }
+
+    /// Register a custom tool from Swift
+    pub fn register_custom_tool(
+        &self,
+        tool: Box<dyn CustomTool>,
+    ) -> Result<(), MuxFfiError> {
+        let bridge = FfiToolBridge::new(tool).map_err(|e| MuxFfiError::Engine {
+            message: e.to_string(),
+        })?;
+        let name = bridge.name().to_string();
+        self.custom_tools.write().insert(name, Arc::new(bridge));
+        Ok(())
+    }
+
+    /// Unregister a custom tool by name
+    pub fn unregister_custom_tool(&self, name: String) -> Result<(), MuxFfiError> {
+        if self.custom_tools.write().remove(&name).is_none() {
+            return Err(MuxFfiError::ToolNotFound { name });
+        }
+        Ok(())
     }
 
     pub fn send_message(
@@ -691,7 +791,12 @@ impl MuxEngine {
         self.save_messages(&conversation_id);
 
         // Get API key from thread-safe storage
-        let api_key = match self.api_keys.read().get(&Provider::Anthropic).cloned() {
+        let api_key = match self
+            .api_keys
+            .read()
+            .get(&Provider::Anthropic)
+            .map(|c| c.api_key.clone())
+        {
             Some(key) if !key.is_empty() => key,
             _ => {
                 // Fallback to echo if no API key
