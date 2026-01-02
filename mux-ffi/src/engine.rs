@@ -38,11 +38,29 @@ struct ProviderConfig {
     base_url: Option<String>,
 }
 
-/// Stored message for conversation history
+/// Stored message for conversation history.
+/// Uses Vec<ContentBlock> to preserve tool use/result structure.
 #[derive(Clone, Serialize, Deserialize)]
 struct StoredMessage {
     role: Role,
+    content: Vec<ContentBlock>,
+}
+
+/// Legacy format (pre-v0.6.2) stored content as String.
+/// Used for migration of old conversation files.
+#[derive(Clone, Deserialize)]
+struct LegacyStoredMessage {
+    role: Role,
     content: String,
+}
+
+impl From<LegacyStoredMessage> for StoredMessage {
+    fn from(legacy: LegacyStoredMessage) -> Self {
+        StoredMessage {
+            role: legacy.role,
+            content: vec![ContentBlock::text(legacy.content)],
+        }
+    }
 }
 
 /// File names for persistence
@@ -923,7 +941,7 @@ impl MuxEngine {
                 .or_insert_with(Vec::new);
             messages.push(StoredMessage {
                 role: Role::User,
-                content: content.clone(),
+                content: vec![ContentBlock::text(content.clone())],
             });
         }
 
@@ -949,7 +967,7 @@ impl MuxEngine {
                     if let Some(messages) = history.get_mut(&conversation_id) {
                         messages.push(StoredMessage {
                             role: Role::Assistant,
-                            content: echo_text.clone(),
+                            content: vec![ContentBlock::text(echo_text.clone())],
                         });
                     }
                 }
@@ -1025,7 +1043,7 @@ impl MuxEngine {
                 full_text.push_str(&warning);
                 break;
             }
-            // Build message history for context
+            // Build message history for context - preserves ToolUse/ToolResult structure
             let messages: Vec<Message> = {
                 let history = self.message_history.read();
                 history
@@ -1034,7 +1052,7 @@ impl MuxEngine {
                         msgs.iter()
                             .map(|m| Message {
                                 role: m.role,
-                                content: vec![ContentBlock::text(m.content.clone())],
+                                content: m.content.clone(),
                             })
                             .collect()
                     })
@@ -1126,7 +1144,7 @@ impl MuxEngine {
                     if let Some(messages) = history.get_mut(&conversation_id) {
                         messages.push(StoredMessage {
                             role: Role::Assistant,
-                            content: response_text,
+                            content: vec![ContentBlock::text(response_text)],
                         });
                     }
                 }
@@ -1252,43 +1270,22 @@ impl MuxEngine {
                 }
             }
 
-            // Store assistant response with tool uses in history as text representation.
-            // NOTE (MVP limitation): We store tool results as text "[Tool Result {id}]: {content}"
-            // rather than proper ToolUse/ToolResult ContentBlocks. This loses semantic structure
-            // but works for simple conversations. Future improvement: store structured messages
-            // and reconstruct proper ContentBlock types when building the request.
+            // Store assistant response with tool uses - preserves ToolUse blocks
+            // This ensures Claude recognizes tool calls on subsequent iterations
             {
                 let mut history = self.message_history.write();
                 if let Some(messages) = history.get_mut(&conversation_id) {
-                    // Store assistant message
-                    if !response_text.is_empty() {
-                        messages.push(StoredMessage {
-                            role: Role::Assistant,
-                            content: response_text,
-                        });
-                    }
-                    // Store tool results as user message
-                    let tool_results_text: String = tool_results
-                        .iter()
-                        .filter_map(|block| match block {
-                            ContentBlock::ToolResult {
-                                tool_use_id,
-                                content,
-                                is_error,
-                            } => Some(format!(
-                                "[Tool Result {}{}]: {}",
-                                tool_use_id,
-                                if *is_error { " (error)" } else { "" },
-                                content
-                            )),
-                            _ => None,
-                        })
-                        .collect::<Vec<_>>()
-                        .join("\n");
-                    if !tool_results_text.is_empty() {
+                    // Store the full assistant response including ToolUse blocks
+                    messages.push(StoredMessage {
+                        role: Role::Assistant,
+                        content: response.content.clone(),
+                    });
+
+                    // Store tool results as user message with proper ToolResult blocks
+                    if !tool_results.is_empty() {
                         messages.push(StoredMessage {
                             role: Role::User,
-                            content: tool_results_text,
+                            content: tool_results.clone(),
                         });
                     }
                 }
@@ -1494,6 +1491,7 @@ impl MuxEngine {
     }
 
     /// Load all message histories from disk based on known conversations.
+    /// Handles migration from legacy format (String content) to new format (Vec<ContentBlock>).
     fn load_all_messages(
         data_dir: &PathBuf,
         conversations: &HashMap<String, Vec<Conversation>>,
@@ -1505,7 +1503,16 @@ impl MuxEngine {
             for conv in convs {
                 let path = messages_dir.join(format!("{}.json", conv.id));
                 if let Ok(contents) = fs::read_to_string(&path) {
+                    // Try new format first
                     if let Ok(msgs) = serde_json::from_str::<Vec<StoredMessage>>(&contents) {
+                        all_messages.insert(conv.id.clone(), msgs);
+                    }
+                    // Fall back to legacy format (String content)
+                    else if let Ok(legacy_msgs) =
+                        serde_json::from_str::<Vec<LegacyStoredMessage>>(&contents)
+                    {
+                        let msgs: Vec<StoredMessage> =
+                            legacy_msgs.into_iter().map(StoredMessage::from).collect();
                         all_messages.insert(conv.id.clone(), msgs);
                     }
                 }
