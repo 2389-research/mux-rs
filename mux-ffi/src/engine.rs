@@ -2,17 +2,20 @@
 // ABOUTME: Manages workspaces, conversations, and bridges to mux core.
 
 use crate::bridge::FfiToolBridge;
-use crate::callback::{ChatCallback, ChatResult, CustomTool, HookHandler, ToolUseRequest};
+use crate::callback::{
+    ChatCallback, ChatResult, CustomTool, HookHandler, SubagentCallback, ToolUseRequest,
+};
 use crate::types::{
     AgentConfig, ApprovalDecision, Conversation, McpServerConfig, McpTransportType, Provider,
-    Workspace, WorkspaceSummary,
+    SubagentResult, TranscriptData, Workspace, WorkspaceSummary,
 };
 use crate::MuxFfiError;
 use mux::agent::MemoryTranscriptStore;
+use mux::llm::GeminiClient;
 use mux::prelude::{
-    AnthropicClient, ContentBlock, LlmClient, McpClient, McpContentBlock,
-    McpServerConfig as MuxMcpServerConfig, McpToolInfo, McpTransport, Message, Request, Role,
-    StopReason, ToolDefinition,
+    AgentDefinition, AnthropicClient, ContentBlock, LlmClient, McpClient, McpContentBlock,
+    McpServerConfig as MuxMcpServerConfig, McpToolInfo, McpTransport, Message, OpenAIClient,
+    Registry, Request, Role, StopReason, SubAgent, ToolDefinition,
 };
 use mux::tool::Tool;
 use mux::tools::{BashTool, ListFilesTool, ReadFileTool, SearchTool, WriteFileTool};
@@ -539,6 +542,76 @@ impl MuxEngine {
             };
             rt.block_on(async move {
                 engine.do_disconnect_workspace_servers(&workspace_id).await;
+            });
+        });
+    }
+
+    /// Spawn a subagent to perform a task.
+    /// The agent runs asynchronously and results are delivered via the callback.
+    pub fn spawn_agent(
+        self: Arc<Self>,
+        workspace_id: String,
+        agent_name: String,
+        task: String,
+        save_transcript: bool,
+        callback: Box<dyn SubagentCallback>,
+    ) {
+        let engine = self.clone();
+        let callback = Arc::new(callback);
+
+        std::thread::spawn(move || {
+            let rt = match Runtime::new() {
+                Ok(rt) => rt,
+                Err(e) => {
+                    callback.on_error("".to_string(), format!("Failed to create runtime: {}", e));
+                    return;
+                }
+            };
+
+            rt.block_on(async move {
+                match engine
+                    .do_spawn_agent(
+                        workspace_id,
+                        agent_name,
+                        task,
+                        save_transcript,
+                        callback.clone(),
+                    )
+                    .await
+                {
+                    Ok(result) => callback.on_complete(result),
+                    Err(e) => callback.on_error("".to_string(), e),
+                }
+            });
+        });
+    }
+
+    /// Resume an agent from a saved transcript.
+    /// The agent continues from where it left off, with results delivered via the callback.
+    pub fn resume_agent(
+        self: Arc<Self>,
+        transcript: TranscriptData,
+        callback: Box<dyn SubagentCallback>,
+    ) {
+        let engine = self.clone();
+        let callback = Arc::new(callback);
+        let agent_id = transcript.agent_id.clone();
+
+        std::thread::spawn(move || {
+            let rt = match Runtime::new() {
+                Ok(rt) => rt,
+                Err(e) => {
+                    callback
+                        .on_error(agent_id.clone(), format!("Failed to create runtime: {}", e));
+                    return;
+                }
+            };
+
+            rt.block_on(async move {
+                match engine.do_resume_agent(transcript, callback.clone()).await {
+                    Ok(result) => callback.on_complete(result),
+                    Err(e) => callback.on_error(agent_id, e),
+                }
             });
         });
     }
@@ -1205,5 +1278,150 @@ impl MuxEngine {
                 eprintln!("Failed to delete message file {}: {}", path.display(), e);
             }
         }
+    }
+}
+
+/// Subagent implementation methods.
+impl MuxEngine {
+    /// Internal implementation of spawn_agent.
+    async fn do_spawn_agent(
+        &self,
+        _workspace_id: String,
+        agent_name: String,
+        task: String,
+        save_transcript: bool,
+        _callback: Arc<Box<dyn SubagentCallback>>,
+    ) -> Result<SubagentResult, String> {
+        // Get agent config
+        let config = self
+            .agent_configs
+            .read()
+            .get(&agent_name)
+            .cloned()
+            .ok_or_else(|| format!("Agent not found: {}", agent_name))?;
+
+        // Get provider config
+        let provider = self.default_provider.read().clone();
+        let provider_config = self
+            .api_keys
+            .read()
+            .get(&provider)
+            .cloned()
+            .ok_or_else(|| format!("Provider not configured: {:?}", provider))?;
+
+        // Create LLM client based on provider
+        let client: Arc<dyn LlmClient> = match provider {
+            Provider::Anthropic => Arc::new(AnthropicClient::new(&provider_config.api_key)),
+            Provider::OpenAI | Provider::Ollama => {
+                let mut c = OpenAIClient::new(&provider_config.api_key);
+                if let Some(url) = &provider_config.base_url {
+                    c = c.with_base_url(url);
+                }
+                Arc::new(c)
+            }
+            Provider::Gemini => Arc::new(GeminiClient::new(&provider_config.api_key)),
+        };
+
+        // Build tool registry with built-in tools
+        let registry = Registry::new();
+        for tool in &self.builtin_tools {
+            registry.register_arc(tool.clone()).await;
+        }
+
+        // Create agent definition from config
+        let model = config
+            .model
+            .unwrap_or_else(|| "claude-sonnet-4-20250514".to_string());
+        let definition = AgentDefinition::new(&agent_name, &config.system_prompt)
+            .model(&model)
+            .max_iterations(config.max_iterations as usize);
+
+        // Create and run subagent
+        let mut subagent = SubAgent::new(definition, client, registry);
+        let agent_id = subagent.agent_id().to_string();
+
+        let result = subagent.run(&task).await.map_err(|e| e.to_string())?;
+
+        // Optionally save transcript
+        let transcript_json = if save_transcript {
+            Some(serde_json::to_string(subagent.transcript()).unwrap_or_default())
+        } else {
+            None
+        };
+
+        Ok(SubagentResult {
+            agent_id: agent_id.clone(),
+            content: result.content,
+            tool_use_count: result.tool_use_count as u32,
+            iterations: result.iterations as u32,
+            transcript_json,
+        })
+    }
+
+    /// Internal implementation of resume_agent.
+    async fn do_resume_agent(
+        &self,
+        transcript: TranscriptData,
+        _callback: Arc<Box<dyn SubagentCallback>>,
+    ) -> Result<SubagentResult, String> {
+        // Parse transcript messages
+        let messages: Vec<Message> = serde_json::from_str(&transcript.messages_json)
+            .map_err(|e| format!("Invalid transcript JSON: {}", e))?;
+
+        // Get provider config
+        let provider = self.default_provider.read().clone();
+        let provider_config = self
+            .api_keys
+            .read()
+            .get(&provider)
+            .cloned()
+            .ok_or_else(|| format!("Provider not configured: {:?}", provider))?;
+
+        // Create LLM client (all providers supported for resume)
+        let client: Arc<dyn LlmClient> = match provider {
+            Provider::Anthropic => Arc::new(AnthropicClient::new(&provider_config.api_key)),
+            Provider::OpenAI | Provider::Ollama => {
+                let mut c = OpenAIClient::new(&provider_config.api_key);
+                if let Some(url) = &provider_config.base_url {
+                    c = c.with_base_url(url);
+                }
+                Arc::new(c)
+            }
+            Provider::Gemini => Arc::new(GeminiClient::new(&provider_config.api_key)),
+        };
+
+        // Build tool registry with built-in tools
+        let registry = Registry::new();
+        for tool in &self.builtin_tools {
+            registry.register_arc(tool.clone()).await;
+        }
+
+        // Create definition for resume
+        let definition = AgentDefinition::new("resumed", "You are a helpful assistant.")
+            .max_iterations(10);
+
+        // Resume agent with transcript
+        let mut subagent = SubAgent::resume(
+            transcript.agent_id.clone(),
+            definition,
+            client,
+            registry,
+            messages,
+        );
+
+        let result = subagent
+            .run("Continue from where you left off.")
+            .await
+            .map_err(|e| e.to_string())?;
+
+        Ok(SubagentResult {
+            agent_id: result.agent_id,
+            content: result.content,
+            tool_use_count: result.tool_use_count as u32,
+            iterations: result.iterations as u32,
+            transcript_json: Some(
+                serde_json::to_string(subagent.transcript()).unwrap_or_default(),
+            ),
+        })
     }
 }
