@@ -183,12 +183,12 @@ impl SubAgent {
                 });
             }
 
-            // Build the request
+            // Build the request - model must be configured
             let model = self
                 .definition
                 .model
                 .clone()
-                .unwrap_or_else(|| "claude-sonnet-4-20250514".to_string());
+                .ok_or_else(|| LlmError::Configuration("Agent definition has no model configured. Set model in AgentDefinition.".to_string()))?;
 
             let request = Request::new(&model)
                 .system(&self.definition.system_prompt)

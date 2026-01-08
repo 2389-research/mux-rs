@@ -147,7 +147,7 @@ impl Tool for FfiTaskTool {
                 },
                 "model": {
                     "type": "string",
-                    "description": "Model to use for ad-hoc agents (e.g., 'claude-opus-4-20250514'). Only used with system_prompt."
+                    "description": "Model to use. REQUIRED for ad-hoc agents (system_prompt). For registered agents, uses the model from AgentConfig."
                 },
                 "task": {
                     "type": "string",
@@ -200,8 +200,15 @@ impl Tool for FfiTaskTool {
                 }
             }
         } else if let Some(prompt) = system_prompt {
-            // Create ad-hoc agent
-            let model = model_param.unwrap_or("claude-sonnet-4-20250514");
+            // Create ad-hoc agent - model is required
+            let model = match model_param {
+                Some(m) => m,
+                None => {
+                    return Ok(ToolResult::error(
+                        "Ad-hoc agents require a 'model' parameter (e.g., 'claude-sonnet-4-5-20250929')",
+                    ));
+                }
+            };
             let def = AgentDefinition::new("adhoc", prompt).model(model);
             (def, "adhoc".to_string())
         } else {
@@ -210,11 +217,15 @@ impl Tool for FfiTaskTool {
             ));
         };
 
-        // Determine which model/client to use
-        let model = definition
-            .model
-            .clone()
-            .unwrap_or_else(|| "claude-sonnet-4-20250514".to_string());
+        // Determine which model/client to use - model must be set
+        let model = match definition.model.clone() {
+            Some(m) => m,
+            None => {
+                return Ok(ToolResult::error(
+                    "Agent definition has no model configured. Set model in AgentConfig or provide 'model' parameter.",
+                ));
+            }
+        };
         let client = (self.client_factory)(&model);
 
         // Create the subagent (new or resumed)

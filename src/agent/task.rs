@@ -129,11 +129,15 @@ impl Tool for TaskTool {
             }
         };
 
-        // Determine which model/client to use
-        let model = definition
-            .model
-            .clone()
-            .unwrap_or_else(|| "claude-sonnet-4-20250514".to_string());
+        // Determine which model/client to use - model must be configured
+        let model = match definition.model.clone() {
+            Some(m) => m,
+            None => {
+                return Ok(ToolResult::error(
+                    "Agent definition has no model configured. Set model in AgentDefinition.",
+                ));
+            }
+        };
         let client = (self.client_factory)(&model);
 
         // Create the subagent (new or resumed)

@@ -36,6 +36,8 @@ use tokio::sync::Mutex as TokioMutex;
 struct ProviderConfig {
     api_key: String,
     base_url: Option<String>,
+    /// Default model for this provider. Must be set by Swift - no hardcoded defaults.
+    default_model: Option<String>,
 }
 
 /// Stored message for conversation history.
@@ -67,9 +69,6 @@ impl From<LegacyStoredMessage> for StoredMessage {
 const WORKSPACES_FILE: &str = "workspaces.json";
 const CONVERSATIONS_FILE: &str = "conversations.json";
 const MESSAGES_DIR: &str = "messages";
-
-/// Default LLM model when workspace doesn't specify one
-const DEFAULT_MODEL: &str = "claude-sonnet-4-20250514";
 
 /// Holds a connected MCP client and its available tools.
 struct McpClientHandle {
@@ -320,7 +319,9 @@ impl MuxEngine {
 
     pub fn set_api_key(&self, provider: Provider, key: String) {
         // Store API key in thread-safe storage using set_provider_config
-        self.set_provider_config(provider, key, None);
+        // Note: This preserves existing default_model if any
+        let existing_model = self.get_default_model(provider.clone());
+        self.set_provider_config(provider, key, None, existing_model);
     }
 
     /// Get stored API key for a provider
@@ -337,10 +338,24 @@ impl MuxEngine {
         provider: Provider,
         api_key: String,
         base_url: Option<String>,
+        default_model: Option<String>,
     ) {
+        self.api_keys.write().insert(
+            provider,
+            ProviderConfig {
+                api_key,
+                base_url,
+                default_model,
+            },
+        );
+    }
+
+    /// Get the default model for a provider
+    pub fn get_default_model(&self, provider: Provider) -> Option<String> {
         self.api_keys
-            .write()
-            .insert(provider, ProviderConfig { api_key, base_url });
+            .read()
+            .get(&provider)
+            .and_then(|c| c.default_model.clone())
     }
 
     /// Set the default provider for new workspaces
@@ -807,7 +822,7 @@ impl MuxEngine {
                         },
                         "model": {
                             "type": "string",
-                            "description": "Model to use for ad-hoc agents (e.g., 'claude-opus-4-20250514'). Only used with system_prompt."
+                            "description": "Model to use. REQUIRED for ad-hoc agents (system_prompt). For registered agents, uses the model from AgentConfig."
                         },
                         "task": {
                             "type": "string",
@@ -1017,10 +1032,17 @@ impl MuxEngine {
             .map(|ws_id| self.get_workspace_tools(ws_id))
             .unwrap_or_default();
 
-        // Get model from workspace config, falling back to default
+        // Get model from workspace config, falling back to provider default
+        let provider = self.default_provider.read().clone();
         let model = self
             .get_model_for_conversation(&conversation_id)
-            .unwrap_or_else(|| DEFAULT_MODEL.to_string());
+            .or_else(|| self.get_default_model(provider.clone()))
+            .ok_or_else(|| {
+                format!(
+                    "No model configured. Set default_model via set_provider_config for {:?}",
+                    provider
+                )
+            })?;
 
         let mut total_tool_use_count = 0u32;
         let mut total_input_tokens = 0u32;
@@ -1317,13 +1339,21 @@ impl MuxEngine {
 
         // Build AgentRegistry from registered agent configs
         let agent_registry = AgentRegistry::new();
+        let provider = self.default_provider.read().clone();
+        let provider_default_model = self.get_default_model(provider.clone());
         {
             let configs = self.agent_configs.read();
             for (name, config) in configs.iter() {
                 let model = config
                     .model
                     .clone()
-                    .unwrap_or_else(|| DEFAULT_MODEL.to_string());
+                    .or_else(|| provider_default_model.clone())
+                    .ok_or_else(|| {
+                        format!(
+                            "No model configured for agent '{}'. Set model in AgentConfig or set default_model via set_provider_config",
+                            name
+                        )
+                    })?;
 
                 let mut definition = AgentDefinition::new(name, &config.system_prompt)
                     .model(&model)
@@ -1682,7 +1712,13 @@ impl MuxEngine {
         let model = config
             .model
             .clone()
-            .unwrap_or_else(|| DEFAULT_MODEL.to_string());
+            .or_else(|| provider_config.default_model.clone())
+            .ok_or_else(|| {
+                format!(
+                    "No model configured for agent '{}'. Set model in AgentConfig or set default_model via set_provider_config",
+                    agent_name
+                )
+            })?;
         let mut definition = AgentDefinition::new(&agent_name, &config.system_prompt)
             .model(&model)
             .max_iterations(config.max_iterations as usize);

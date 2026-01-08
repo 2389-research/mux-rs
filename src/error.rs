@@ -31,6 +31,9 @@ pub enum LlmError {
 
     #[error("Deserialization error: {0}")]
     Deserialize(#[from] serde_json::Error),
+
+    #[error("Configuration error: {0}")]
+    Configuration(String),
 }
 
 /// Errors from tool operations.

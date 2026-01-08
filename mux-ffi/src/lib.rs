@@ -135,19 +135,35 @@ mod tests {
     fn test_provider_config() {
         let engine = MuxEngine::new("/tmp/mux-test-providers".to_string()).unwrap();
 
-        // Set provider config
-        engine.set_provider_config(Provider::Anthropic, "sk-test".to_string(), None);
+        // Set provider config with default models
+        engine.set_provider_config(
+            Provider::Anthropic,
+            "sk-test".to_string(),
+            None,
+            Some("claude-sonnet-4-5-20250929".to_string()),
+        );
         engine.set_provider_config(
             Provider::OpenAI,
             "sk-openai".to_string(),
             Some("https://api.openai.com".to_string()),
+            Some("gpt-4o".to_string()),
         );
 
-        // Verify
+        // Verify API keys
         assert_eq!(engine.get_api_key(Provider::Anthropic), Some("sk-test".to_string()));
         assert_eq!(engine.get_api_key(Provider::OpenAI), Some("sk-openai".to_string()));
 
-        // Set default
+        // Verify default models
+        assert_eq!(
+            engine.get_default_model(Provider::Anthropic),
+            Some("claude-sonnet-4-5-20250929".to_string())
+        );
+        assert_eq!(
+            engine.get_default_model(Provider::OpenAI),
+            Some("gpt-4o".to_string())
+        );
+
+        // Set default provider
         engine.set_default_provider(Provider::Gemini);
         assert_eq!(engine.get_default_provider(), Provider::Gemini);
     }
