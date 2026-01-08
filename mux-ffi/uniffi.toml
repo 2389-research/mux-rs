@@ -1,7 +1,12 @@
-# ABOUTME: UniFFI configuration for Swift binding generation.
-# ABOUTME: Configures module names and Swift-specific options.
+# ABOUTME: UniFFI configuration for Swift and Kotlin binding generation.
+# ABOUTME: Configures module names and language-specific options.
 
 [bindings.swift]
 module_name = "MuxFFI"
 ffi_module_name = "MuxFFIFFI"
+generate_immutable_records = true
+
+[bindings.kotlin]
+package_name = "com.hibi.mux.ffi"
+cdylib_name = "mux_ffi"
 generate_immutable_records = true
