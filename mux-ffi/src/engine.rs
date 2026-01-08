@@ -3,9 +3,10 @@
 
 use crate::bridge::FfiToolBridge;
 use crate::callback::{
-    ChatCallback, ChatResult, CustomTool, HookHandler, SubagentCallback, SubagentEventHandler,
-    ToolUseRequest,
+    ChatCallback, ChatResult, CustomTool, HookHandler, LlmProvider, SubagentCallback,
+    SubagentEventHandler, ToolUseRequest,
 };
+use crate::callback_client::CallbackLlmClient;
 use crate::task_tool::FfiTaskTool;
 use crate::types::{
     AgentConfig, ApprovalDecision, Conversation, McpServerConfig, McpTransportType, Provider,
@@ -109,6 +110,8 @@ pub struct MuxEngine {
     default_provider: Arc<RwLock<Provider>>,
     /// Subagent event handler for TaskTool events
     subagent_event_handler: Arc<RwLock<Option<Box<dyn SubagentEventHandler>>>>,
+    /// Registered callback LLM providers, keyed by name
+    callback_providers: Arc<RwLock<HashMap<String, Arc<CallbackLlmClient>>>>,
 }
 
 #[uniffi::export]
@@ -156,6 +159,7 @@ impl MuxEngine {
             transcript_store: MemoryTranscriptStore::shared(),
             default_provider: Arc::new(RwLock::new(Provider::Anthropic)),
             subagent_event_handler: Arc::new(RwLock::new(None)),
+            callback_providers: Arc::new(RwLock::new(HashMap::new())),
         }))
     }
 
@@ -407,6 +411,28 @@ impl MuxEngine {
     /// Clear the current subagent event handler.
     pub fn clear_subagent_event_handler(&self) {
         *self.subagent_event_handler.write() = None;
+    }
+
+    /// Register a callback-based LLM provider.
+    /// The provider can then be used via `set_default_provider(Provider::Custom { name })`.
+    pub fn register_llm_provider(&self, name: String, provider: Box<dyn LlmProvider>) {
+        let client = CallbackLlmClient::new(provider);
+        self.callback_providers
+            .write()
+            .insert(name, Arc::new(client));
+    }
+
+    /// Unregister a callback LLM provider.
+    pub fn unregister_llm_provider(&self, name: String) -> Result<(), MuxFfiError> {
+        if self.callback_providers.write().remove(&name).is_none() {
+            return Err(MuxFfiError::LlmProviderNotFound { name });
+        }
+        Ok(())
+    }
+
+    /// List registered callback LLM providers.
+    pub fn list_llm_providers(&self) -> Vec<String> {
+        self.callback_providers.read().keys().cloned().collect()
     }
 
     /// Register a custom tool from Swift
@@ -1386,30 +1412,51 @@ impl MuxEngine {
 
         // Get provider config for client factory
         let provider = self.default_provider.read().clone();
-        let provider_config = self
-            .api_keys
-            .read()
-            .get(&provider)
-            .cloned()
-            .ok_or_else(|| format!("Provider not configured: {:?}", provider))?;
+
+        // For Custom providers, we don't need API key config
+        let provider_config = match &provider {
+            Provider::Custom { .. } => None,
+            _ => Some(
+                self.api_keys
+                    .read()
+                    .get(&provider)
+                    .cloned()
+                    .ok_or_else(|| format!("Provider not configured: {:?}", provider))?,
+            ),
+        };
 
         // Clone what we need for the client factory closure
         let provider_clone = provider.clone();
-        let api_key = provider_config.api_key.clone();
-        let base_url = provider_config.base_url.clone();
+        let api_key = provider_config.as_ref().map(|c| c.api_key.clone());
+        let base_url = provider_config.as_ref().and_then(|c| c.base_url.clone());
+        let callback_providers = self.callback_providers.clone();
 
         // Create client factory
         let client_factory = move |_model: &str| -> Arc<dyn LlmClient> {
-            match provider_clone {
-                Provider::Anthropic => Arc::new(AnthropicClient::new(&api_key)),
+            match &provider_clone {
+                Provider::Custom { name } => {
+                    callback_providers
+                        .read()
+                        .get(name)
+                        .cloned()
+                        .map(|c| c as Arc<dyn LlmClient>)
+                        .unwrap_or_else(|| {
+                            // Fallback to a dummy client if provider not found
+                            // This shouldn't happen in practice
+                            Arc::new(AnthropicClient::new(""))
+                        })
+                }
+                Provider::Anthropic => {
+                    Arc::new(AnthropicClient::new(api_key.as_deref().unwrap_or("")))
+                }
                 Provider::OpenAI | Provider::Ollama => {
-                    let mut c = OpenAIClient::new(&api_key);
+                    let mut c = OpenAIClient::new(api_key.as_deref().unwrap_or(""));
                     if let Some(ref url) = base_url {
                         c = c.with_base_url(url);
                     }
                     Arc::new(c)
                 }
-                Provider::Gemini => Arc::new(GeminiClient::new(&api_key)),
+                Provider::Gemini => Arc::new(GeminiClient::new(api_key.as_deref().unwrap_or(""))),
             }
         };
 
@@ -1672,26 +1719,40 @@ impl MuxEngine {
             .cloned()
             .ok_or_else(|| format!("Agent not found: {}", agent_name))?;
 
-        // Get provider config
+        // Get provider and create LLM client
         let provider = self.default_provider.read().clone();
-        let provider_config = self
-            .api_keys
-            .read()
-            .get(&provider)
-            .cloned()
-            .ok_or_else(|| format!("Provider not configured: {:?}", provider))?;
-
-        // Create LLM client based on provider
-        let client: Arc<dyn LlmClient> = match provider {
-            Provider::Anthropic => Arc::new(AnthropicClient::new(&provider_config.api_key)),
-            Provider::OpenAI | Provider::Ollama => {
-                let mut c = OpenAIClient::new(&provider_config.api_key);
-                if let Some(url) = &provider_config.base_url {
-                    c = c.with_base_url(url);
-                }
-                Arc::new(c)
+        let client: Arc<dyn LlmClient> = match &provider {
+            Provider::Custom { name } => {
+                self.callback_providers
+                    .read()
+                    .get(name)
+                    .cloned()
+                    .map(|c| c as Arc<dyn LlmClient>)
+                    .ok_or_else(|| format!("Callback provider '{}' not registered", name))?
             }
-            Provider::Gemini => Arc::new(GeminiClient::new(&provider_config.api_key)),
+            _ => {
+                let provider_config = self
+                    .api_keys
+                    .read()
+                    .get(&provider)
+                    .cloned()
+                    .ok_or_else(|| format!("Provider not configured: {:?}", provider))?;
+
+                match provider {
+                    Provider::Anthropic => {
+                        Arc::new(AnthropicClient::new(&provider_config.api_key))
+                    }
+                    Provider::OpenAI | Provider::Ollama => {
+                        let mut c = OpenAIClient::new(&provider_config.api_key);
+                        if let Some(url) = &provider_config.base_url {
+                            c = c.with_base_url(url);
+                        }
+                        Arc::new(c)
+                    }
+                    Provider::Gemini => Arc::new(GeminiClient::new(&provider_config.api_key)),
+                    Provider::Custom { .. } => unreachable!(),
+                }
+            }
         };
 
         // Build tool registry with built-in tools
@@ -1709,10 +1770,12 @@ impl MuxEngine {
         }
 
         // Create agent definition from config with allowed/denied tools
+        // Get default model from provider config (not available for Custom providers)
+        let default_model = self.get_default_model(provider.clone());
         let model = config
             .model
             .clone()
-            .or_else(|| provider_config.default_model.clone())
+            .or(default_model)
             .ok_or_else(|| {
                 format!(
                     "No model configured for agent '{}'. Set model in AgentConfig or set default_model via set_provider_config",
@@ -1780,26 +1843,40 @@ impl MuxEngine {
         let messages: Vec<Message> = serde_json::from_str(&transcript.messages_json)
             .map_err(|e| format!("Invalid transcript JSON: {}", e))?;
 
-        // Get provider config
+        // Get provider and create LLM client (all providers supported for resume)
         let provider = self.default_provider.read().clone();
-        let provider_config = self
-            .api_keys
-            .read()
-            .get(&provider)
-            .cloned()
-            .ok_or_else(|| format!("Provider not configured: {:?}", provider))?;
-
-        // Create LLM client (all providers supported for resume)
-        let client: Arc<dyn LlmClient> = match provider {
-            Provider::Anthropic => Arc::new(AnthropicClient::new(&provider_config.api_key)),
-            Provider::OpenAI | Provider::Ollama => {
-                let mut c = OpenAIClient::new(&provider_config.api_key);
-                if let Some(url) = &provider_config.base_url {
-                    c = c.with_base_url(url);
-                }
-                Arc::new(c)
+        let client: Arc<dyn LlmClient> = match &provider {
+            Provider::Custom { name } => {
+                self.callback_providers
+                    .read()
+                    .get(name)
+                    .cloned()
+                    .map(|c| c as Arc<dyn LlmClient>)
+                    .ok_or_else(|| format!("Callback provider '{}' not registered", name))?
             }
-            Provider::Gemini => Arc::new(GeminiClient::new(&provider_config.api_key)),
+            _ => {
+                let provider_config = self
+                    .api_keys
+                    .read()
+                    .get(&provider)
+                    .cloned()
+                    .ok_or_else(|| format!("Provider not configured: {:?}", provider))?;
+
+                match provider {
+                    Provider::Anthropic => {
+                        Arc::new(AnthropicClient::new(&provider_config.api_key))
+                    }
+                    Provider::OpenAI | Provider::Ollama => {
+                        let mut c = OpenAIClient::new(&provider_config.api_key);
+                        if let Some(url) = &provider_config.base_url {
+                            c = c.with_base_url(url);
+                        }
+                        Arc::new(c)
+                    }
+                    Provider::Gemini => Arc::new(GeminiClient::new(&provider_config.api_key)),
+                    Provider::Custom { .. } => unreachable!(),
+                }
+            }
         };
 
         // Build tool registry with built-in tools

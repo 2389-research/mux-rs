@@ -1,7 +1,7 @@
 // ABOUTME: Callback interfaces for async operations from Rust to Swift.
 // ABOUTME: Swift implements these traits to receive streaming updates.
 
-use crate::types::{HookEventType, HookResponse, SubagentResult, ToolExecutionResult};
+use crate::types::{HookEventType, HookResponse, LlmRequest, LlmResponse, SubagentResult, ToolExecutionResult};
 
 /// Represents a tool use request that will be sent to Swift for display/logging.
 #[derive(Debug, Clone, uniffi::Record)]
@@ -125,4 +125,35 @@ pub trait SubagentEventHandler: Send + Sync {
 
     /// Called when the subagent encounters an error.
     fn on_agent_error(&self, subagent_id: String, error: String);
+}
+
+// ============================================================================
+// Callback LLM Provider
+// ============================================================================
+
+/// Callback interface that Swift implements to provide LLM generation.
+/// This allows on-device models (like Apple Foundation Models) to integrate
+/// with Mux's orchestration system.
+///
+/// # Example (Swift)
+/// ```swift
+/// final class FoundationModelsProvider: LlmProvider {
+///     func generate(request: LlmRequest) -> LlmResponse {
+///         let session = LanguageModelSession()
+///         let response = try session.respond(to: request.messages)
+///         return LlmResponse(
+///             text: response.text,
+///             toolCalls: response.toolCalls.map { ... },
+///             usage: LlmUsage(inputTokens: 0, outputTokens: 0),
+///             error: nil
+///         )
+///     }
+/// }
+/// ```
+#[uniffi::export(callback_interface)]
+pub trait LlmProvider: Send + Sync {
+    /// Generate a response for the given request.
+    /// This is a blocking call - implement with async internally if needed.
+    /// Return LlmResponse with error field set if generation fails.
+    fn generate(&self, request: LlmRequest) -> LlmResponse;
 }

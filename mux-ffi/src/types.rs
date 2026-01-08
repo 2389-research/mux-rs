@@ -10,6 +10,8 @@ pub enum Provider {
     OpenAI,
     Gemini,
     Ollama,
+    /// Custom callback-based provider (e.g., Apple Foundation Models)
+    Custom { name: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, uniffi::Record)]
@@ -213,4 +215,66 @@ impl ToolExecutionResult {
     pub fn error(content: String) -> Self {
         Self { content, is_error: true }
     }
+}
+
+// ============================================================================
+// Callback LLM Provider Types
+// ============================================================================
+
+/// Role of a chat message participant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum ChatRole {
+    User,
+    Assistant,
+}
+
+/// A chat message for LLM context.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct ChatMessage {
+    pub role: ChatRole,
+    pub content: String,
+}
+
+/// Tool definition for FFI - UniFFI-safe version of ToolDefinition.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct FfiToolDefinition {
+    pub name: String,
+    pub description: String,
+    /// JSON string of the input schema (serde_json::Value isn't FFI-safe)
+    pub input_schema_json: String,
+}
+
+/// Usage statistics from LLM generation.
+#[derive(Debug, Clone, Default, uniffi::Record)]
+pub struct LlmUsage {
+    pub input_tokens: u32,
+    pub output_tokens: u32,
+}
+
+/// Request for LLM generation via callback provider.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct LlmRequest {
+    pub messages: Vec<ChatMessage>,
+    pub tools: Vec<FfiToolDefinition>,
+    pub system_prompt: Option<String>,
+    pub max_tokens: Option<u32>,
+}
+
+/// Tool call from the LLM.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct LlmToolCall {
+    pub id: String,
+    pub name: String,
+    /// JSON string of the tool arguments
+    pub arguments: String,
+}
+
+/// Response from LLM generation via callback provider.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct LlmResponse {
+    pub text: String,
+    pub tool_calls: Vec<LlmToolCall>,
+    pub usage: LlmUsage,
+    /// Error message if generation failed
+    pub error: Option<String>,
 }

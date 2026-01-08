@@ -18,6 +18,9 @@ pub use bridge::*;
 mod task_tool;
 pub use task_tool::*;
 
+mod callback_client;
+pub use callback_client::*;
+
 #[derive(Debug, thiserror::Error, uniffi::Error)]
 pub enum MuxFfiError {
     #[error("Engine error: {message}")]
@@ -28,6 +31,8 @@ pub enum MuxFfiError {
     ToolNotFound { name: String },
     #[error("Provider not configured: {provider}")]
     ProviderNotConfigured { provider: String },
+    #[error("LLM provider not found: {name}")]
+    LlmProviderNotFound { name: String },
     #[error("Invalid transcript: {reason}")]
     TranscriptInvalid { reason: String },
     #[error("Hook failed: {reason}")]
