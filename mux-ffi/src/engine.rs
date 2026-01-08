@@ -989,45 +989,77 @@ impl MuxEngine {
         // Persist user message to disk
         self.save_messages(&conversation_id);
 
-        // Get API key from thread-safe storage
-        let api_key = match self
-            .api_keys
-            .read()
-            .get(&Provider::Anthropic)
-            .map(|c| c.api_key.clone())
-        {
-            Some(key) if !key.is_empty() => key,
-            _ => {
-                // Fallback to echo if no API key
-                let echo_text = format!("(No API key set) Echo: {}", content);
-                callback.on_text_delta(echo_text.clone());
+        // Get current provider and create appropriate client
+        let provider = self.default_provider.read().clone();
 
-                // Store assistant response
-                {
-                    let mut history = self.message_history.write();
-                    if let Some(messages) = history.get_mut(&conversation_id) {
-                        messages.push(StoredMessage {
-                            role: Role::Assistant,
-                            content: vec![ContentBlock::text(echo_text.clone())],
+        // Build client based on provider type (same pattern as execute_task_tool)
+        let client: Arc<dyn LlmClient> = match &provider {
+            Provider::Custom { name } => {
+                // For custom providers, use registered callback
+                match self.callback_providers.read().get(name).cloned() {
+                    Some(callback_client) => callback_client as Arc<dyn LlmClient>,
+                    None => {
+                        let error = format!(
+                            "Custom LLM provider '{}' not registered. Call register_llm_provider first.",
+                            name
+                        );
+                        callback.on_error(error.clone());
+                        return Err(error);
+                    }
+                }
+            }
+            _ => {
+                // For cloud providers, get API key from config
+                let config = self.api_keys.read().get(&provider).cloned();
+                match config {
+                    Some(c) if !c.api_key.is_empty() => {
+                        match &provider {
+                            Provider::Anthropic => {
+                                Arc::new(AnthropicClient::new(&c.api_key))
+                            }
+                            Provider::OpenAI | Provider::Ollama => {
+                                let mut client = OpenAIClient::new(&c.api_key);
+                                if let Some(ref url) = c.base_url {
+                                    client = client.with_base_url(url);
+                                }
+                                Arc::new(client)
+                            }
+                            Provider::Gemini => {
+                                Arc::new(GeminiClient::new(&c.api_key))
+                            }
+                            Provider::Custom { .. } => unreachable!(),
+                        }
+                    }
+                    _ => {
+                        // Fallback to echo if no API key for cloud provider
+                        let echo_text = format!("(No API key set) Echo: {}", content);
+                        callback.on_text_delta(echo_text.clone());
+
+                        // Store assistant response
+                        {
+                            let mut history = self.message_history.write();
+                            if let Some(messages) = history.get_mut(&conversation_id) {
+                                messages.push(StoredMessage {
+                                    role: Role::Assistant,
+                                    content: vec![ContentBlock::text(echo_text.clone())],
+                                });
+                            }
+                        }
+
+                        // Persist to disk
+                        self.save_messages(&conversation_id);
+
+                        return Ok(ChatResult {
+                            conversation_id,
+                            final_text: echo_text,
+                            tool_use_count: 0,
+                            input_tokens: 0,
+                            output_tokens: 0,
                         });
                     }
                 }
-
-                // Persist to disk
-                self.save_messages(&conversation_id);
-
-                return Ok(ChatResult {
-                    conversation_id,
-                    final_text: echo_text,
-                    tool_use_count: 0,
-                    input_tokens: 0,
-                    output_tokens: 0,
-                });
             }
         };
-
-        // Create client with stored API key
-        let client = AnthropicClient::new(&api_key);
 
         // Get workspace ID for tool lookup
         let workspace_id = self.get_workspace_for_conversation(&conversation_id);
