@@ -1363,9 +1363,19 @@ impl MuxEngine {
             ));
         }
 
+        // Get provider and validate Custom providers exist before proceeding
+        let provider = self.default_provider.read().clone();
+        if let Provider::Custom { ref name } = provider {
+            if !self.callback_providers.read().contains_key(name) {
+                return Err(format!(
+                    "Custom LLM provider '{}' not registered. Call register_llm_provider first.",
+                    name
+                ));
+            }
+        }
+
         // Build AgentRegistry from registered agent configs
         let agent_registry = AgentRegistry::new();
-        let provider = self.default_provider.read().clone();
         let provider_default_model = self.get_default_model(provider.clone());
         {
             let configs = self.agent_configs.read();
@@ -1410,10 +1420,7 @@ impl MuxEngine {
             }
         }
 
-        // Get provider config for client factory
-        let provider = self.default_provider.read().clone();
-
-        // For Custom providers, we don't need API key config
+        // For Custom providers, we don't need API key config (provider already read above)
         let provider_config = match &provider {
             Provider::Custom { .. } => None,
             _ => Some(
@@ -1440,11 +1447,7 @@ impl MuxEngine {
                         .get(name)
                         .cloned()
                         .map(|c| c as Arc<dyn LlmClient>)
-                        .unwrap_or_else(|| {
-                            // Fallback to a dummy client if provider not found
-                            // This shouldn't happen in practice
-                            Arc::new(AnthropicClient::new(""))
-                        })
+                        .expect("Custom provider was validated at start of execute_task_tool")
                 }
                 Provider::Anthropic => {
                     Arc::new(AnthropicClient::new(api_key.as_deref().unwrap_or("")))

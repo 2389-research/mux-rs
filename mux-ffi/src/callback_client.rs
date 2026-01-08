@@ -105,7 +105,13 @@ impl LlmClient for CallbackLlmClient {
 
         for tool_call in llm_response.tool_calls {
             let input: serde_json::Value =
-                serde_json::from_str(&tool_call.arguments).unwrap_or_default();
+                serde_json::from_str(&tool_call.arguments).map_err(|e| LlmError::Api {
+                    status: 0,
+                    message: format!(
+                        "Invalid JSON in tool call '{}' arguments: {}",
+                        tool_call.name, e
+                    ),
+                })?;
             content.push(ContentBlock::ToolUse {
                 id: tool_call.id,
                 name: tool_call.name,
@@ -127,7 +133,7 @@ impl LlmClient for CallbackLlmClient {
             id: uuid::Uuid::new_v4().to_string(),
             content,
             stop_reason,
-            model: "callback-provider".to_string(),
+            model: req.model.clone(),
             usage: Usage {
                 input_tokens: llm_response.usage.input_tokens,
                 output_tokens: llm_response.usage.output_tokens,
@@ -139,9 +145,15 @@ impl LlmClient for CallbackLlmClient {
         &self,
         _req: &Request,
     ) -> Pin<Box<dyn Stream<Item = Result<StreamEvent, LlmError>> + Send + 'static>> {
-        // Streaming not supported for callback providers - return empty stream
-        // The blocking generate() call is used instead
-        Box::pin(futures::stream::empty())
+        // Streaming not supported for callback providers - return error stream
+        // Use create_message() for non-streaming generation instead
+        Box::pin(futures::stream::once(async {
+            Err(LlmError::Api {
+                status: 0,
+                message: "Streaming not supported for callback LLM providers. Use non-streaming API."
+                    .to_string(),
+            })
+        }))
     }
 }
 
@@ -216,5 +228,70 @@ mod tests {
 
         let tool_uses = response.tool_uses();
         assert_eq!(tool_uses.len(), 1);
+    }
+
+    struct ErrorProvider;
+
+    impl LlmProvider for ErrorProvider {
+        fn generate(&self, _request: LlmRequest) -> LlmResponse {
+            LlmResponse {
+                text: String::new(),
+                tool_calls: Vec::new(),
+                usage: LlmUsage::default(),
+                error: Some("Model failed to generate".to_string()),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_callback_client_error() {
+        let client = CallbackLlmClient::new(Box::new(ErrorProvider));
+        let request = Request::new("test-model").message(Message::user("Hello"));
+
+        let result = client.create_message(&request).await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("Model failed to generate"));
+    }
+
+    struct InvalidJsonToolProvider;
+
+    impl LlmProvider for InvalidJsonToolProvider {
+        fn generate(&self, _request: LlmRequest) -> LlmResponse {
+            LlmResponse {
+                text: String::new(),
+                tool_calls: vec![LlmToolCall {
+                    id: "call_bad".to_string(),
+                    name: "bad_tool".to_string(),
+                    arguments: "not valid json {{{".to_string(),
+                }],
+                usage: LlmUsage::default(),
+                error: None,
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_callback_client_invalid_json_error() {
+        let client = CallbackLlmClient::new(Box::new(InvalidJsonToolProvider));
+        let request = Request::new("test-model").message(Message::user("Use a tool"));
+
+        let result = client.create_message(&request).await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("Invalid JSON"));
+        assert!(err.to_string().contains("bad_tool"));
+    }
+
+    #[tokio::test]
+    async fn test_callback_client_model_passthrough() {
+        let client = CallbackLlmClient::new(Box::new(EchoProvider));
+        let request = Request::new("my-custom-model").message(Message::user("Hello"));
+
+        let response = client.create_message(&request).await.unwrap();
+
+        assert_eq!(response.model, "my-custom-model");
     }
 }
