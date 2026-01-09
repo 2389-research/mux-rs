@@ -21,6 +21,9 @@ pub use task_tool::*;
 mod callback_client;
 pub use callback_client::*;
 
+mod context;
+pub use context::*;
+
 #[derive(Debug, thiserror::Error, uniffi::Error)]
 pub enum MuxFfiError {
     #[error("Engine error: {message}")]
