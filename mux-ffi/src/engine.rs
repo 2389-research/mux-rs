@@ -1091,16 +1091,24 @@ impl MuxEngine {
             .unwrap_or_default();
 
         // Get model from workspace config, falling back to provider default
-        let provider = self.default_provider.read().clone();
-        let model = self
-            .get_model_for_conversation(&conversation_id)
-            .or_else(|| self.get_default_model(provider.clone()))
-            .ok_or_else(|| {
-                format!(
-                    "No model configured. Set default_model via set_provider_config for {:?}",
-                    provider
-                )
-            })?;
+        // For custom providers, use a placeholder since the callback handles model selection internally
+        let model = match &provider {
+            Provider::Custom { name } => {
+                // Custom providers handle model selection internally via callback
+                // Use provider name as placeholder for logging/tracking
+                name.clone()
+            }
+            _ => {
+                self.get_model_for_conversation(&conversation_id)
+                    .or_else(|| self.get_default_model(provider.clone()))
+                    .ok_or_else(|| {
+                        format!(
+                            "No model configured. Set default_model via set_provider_config for {:?}",
+                            provider
+                        )
+                    })?
+            }
+        };
 
         let mut total_tool_use_count = 0u32;
         let mut total_input_tokens = 0u32;
