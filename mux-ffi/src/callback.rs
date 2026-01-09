@@ -41,6 +41,10 @@ pub trait ChatCallback: Send + Sync {
 
     /// Called when an error occurs during chat processing.
     fn on_error(&self, error: String);
+
+    /// Called when context usage exceeds the warning threshold.
+    /// Swift can use this to show a UI warning or trigger compaction.
+    fn on_context_warning(&self, usage: crate::context::ContextUsage);
 }
 
 /// Hook handler interface - Swift implements to intercept lifecycle events.
