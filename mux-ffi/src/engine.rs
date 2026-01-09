@@ -1265,12 +1265,12 @@ impl MuxEngine {
                         self.save_messages(&conversation_id);
 
                         return Ok(ChatResult {
-                            conversation_id,
+                            conversation_id: conversation_id.clone(),
                             final_text: echo_text,
                             tool_use_count: 0,
                             input_tokens: 0,
                             output_tokens: 0,
-                            context_usage: Default::default(),
+                            context_usage: self.get_context_usage(conversation_id).unwrap_or_default(),
                         });
                     }
                 }
@@ -1598,12 +1598,12 @@ impl MuxEngine {
         }
 
         Ok(ChatResult {
-            conversation_id,
+            conversation_id: conversation_id.clone(),
             final_text: full_text,
             tool_use_count: total_tool_use_count,
             input_tokens: total_input_tokens,
             output_tokens: total_output_tokens,
-            context_usage: Default::default(),
+            context_usage: self.get_context_usage(conversation_id).unwrap_or_default(),
         })
     }
 
