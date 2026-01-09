@@ -482,19 +482,20 @@ impl MuxEngine {
 
         let (message_count, estimated_tokens) = self.estimate_conversation_tokens(&conversation_id);
 
-        // Get workspace to find model
+        // Get workspace to find model - extract model name first, then release lock
         let workspace_id = self.get_workspace_for_conversation(&conversation_id);
-        let context_limit = if let Some(ws_id) = workspace_id {
+        let model_name = workspace_id.as_ref().and_then(|ws_id| {
             let workspaces = self.workspaces.read();
-            workspaces.get(&ws_id).and_then(|ws| {
-                ws.llm_config.as_ref().and_then(|config| {
-                    let model_config = self.model_context_configs.read();
-                    model_config.get(&config.model).map(|c| c.context_limit)
-                })
-            })
-        } else {
-            None
-        };
+            workspaces
+                .get(ws_id)
+                .and_then(|ws| ws.llm_config.as_ref().map(|c| c.model.clone()))
+        });
+
+        // Now get context limit from model config (separate lock acquisition)
+        let context_limit = model_name.and_then(|model| {
+            let model_configs = self.model_context_configs.read();
+            model_configs.get(&model).map(|c| c.context_limit)
+        });
 
         Ok(ContextUsage::new(message_count, estimated_tokens, context_limit))
     }
@@ -574,7 +575,10 @@ impl MuxEngine {
             }
             CompactionMode::Summarize => {
                 // TODO: Implement LLM-based summarization
-                // For now, fall back to truncate
+                // For now, fall back to truncate with warning
+                eprintln!(
+                    "Warning: CompactionMode::Summarize not yet implemented, falling back to TruncateOldest"
+                );
                 self.truncate_oldest(&conversation_id, target_tokens);
                 self.save_messages(&conversation_id);
             }
@@ -1181,6 +1185,11 @@ impl MuxEngine {
 
     /// Truncate oldest messages to fit within token limit.
     /// Keeps most recent messages, drops oldest.
+    ///
+    /// NOTE: This simple truncation may break ToolUse/ToolResult pairs if the cut
+    /// happens mid-sequence. For small context models where truncation is the primary
+    /// compaction strategy, consider keeping conversations short or using clear_context
+    /// between major tasks to avoid orphaned tool calls.
     fn truncate_oldest(&self, conversation_id: &str, target_tokens: u32) {
         let mut history = self.message_history.write();
         if let Some(messages) = history.get_mut(conversation_id) {
