@@ -7,6 +7,7 @@ use crate::callback::{
     SubagentEventHandler, ToolUseRequest,
 };
 use crate::callback_client::CallbackLlmClient;
+use crate::context::{CompactionMode, ContextUsage, ModelContextConfig, effective_limit, estimate_tokens};
 use crate::task_tool::FfiTaskTool;
 use crate::types::{
     AgentConfig, ApprovalDecision, Conversation, McpServerConfig, McpTransportType, Provider,
@@ -112,6 +113,8 @@ pub struct MuxEngine {
     subagent_event_handler: Arc<RwLock<Option<Box<dyn SubagentEventHandler>>>>,
     /// Registered callback LLM providers, keyed by name
     callback_providers: Arc<RwLock<HashMap<String, Arc<CallbackLlmClient>>>>,
+    /// Per-model context configuration (context limit, compaction mode, etc.)
+    model_context_configs: Arc<RwLock<HashMap<String, ModelContextConfig>>>,
 }
 
 #[uniffi::export]
@@ -160,6 +163,7 @@ impl MuxEngine {
             default_provider: Arc::new(RwLock::new(Provider::Anthropic)),
             subagent_event_handler: Arc::new(RwLock::new(None)),
             callback_providers: Arc::new(RwLock::new(HashMap::new())),
+            model_context_configs: Arc::new(RwLock::new(HashMap::new())),
         }))
     }
 
