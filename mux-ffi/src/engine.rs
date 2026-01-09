@@ -7,7 +7,7 @@ use crate::callback::{
     SubagentEventHandler, ToolUseRequest,
 };
 use crate::callback_client::CallbackLlmClient;
-use crate::context::{CompactionMode, ContextUsage, ModelContextConfig, estimate_tokens};
+use crate::context::{CompactionMode, ContextUsage, ModelContextConfig, effective_limit, estimate_tokens};
 use crate::task_tool::FfiTaskTool;
 use crate::types::{
     AgentConfig, ApprovalDecision, Conversation, McpServerConfig, McpTransportType, Provider,
@@ -528,6 +528,59 @@ impl MuxEngine {
         self.save_messages(&conversation_id);
 
         Ok(())
+    }
+
+    /// Manually trigger context compaction.
+    /// Uses the configured compaction mode for the conversation's model.
+    /// For TruncateOldest: drops oldest messages to fit in limit.
+    /// For Summarize: (TODO) asks LLM to summarize old messages - currently falls back to truncate.
+    #[uniffi::method]
+    pub fn compact_context(&self, conversation_id: String) -> Result<ContextUsage, MuxFfiError> {
+        // Check conversation exists and get workspace
+        let workspace_id = self.get_workspace_for_conversation(&conversation_id)
+            .ok_or_else(|| MuxFfiError::Engine {
+                message: format!("Conversation not found: {}", conversation_id),
+            })?;
+
+        // Get model config
+        let (_model, config) = {
+            let workspaces = self.workspaces.read();
+            let ws = workspaces.get(&workspace_id).ok_or_else(|| MuxFfiError::Engine {
+                message: "Workspace not found".to_string(),
+            })?;
+
+            let model = ws.llm_config
+                .as_ref()
+                .map(|c| c.model.clone())
+                .unwrap_or_default();
+
+            let model_configs = self.model_context_configs.read();
+            let config = model_configs.get(&model).cloned();
+            (model, config)
+        };
+
+        // If no config or no limit, nothing to compact
+        let config = match config {
+            Some(c) if c.context_limit > 0 => c,
+            _ => return self.get_context_usage(conversation_id),
+        };
+
+        let target_tokens = effective_limit(config.context_limit);
+
+        match config.compaction_mode {
+            CompactionMode::TruncateOldest => {
+                self.truncate_oldest(&conversation_id, target_tokens);
+                self.save_messages(&conversation_id);
+            }
+            CompactionMode::Summarize => {
+                // TODO: Implement LLM-based summarization
+                // For now, fall back to truncate
+                self.truncate_oldest(&conversation_id, target_tokens);
+                self.save_messages(&conversation_id);
+            }
+        }
+
+        self.get_context_usage(conversation_id)
     }
 
     /// Register a custom tool from Swift
