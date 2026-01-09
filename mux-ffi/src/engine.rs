@@ -1144,6 +1144,41 @@ impl MuxEngine {
         })
     }
 
+    /// Check context usage and fire warning callback if above threshold.
+    /// Returns true if warning was fired.
+    fn check_and_warn_context(
+        &self,
+        conversation_id: &str,
+        callback: &dyn ChatCallback,
+    ) -> bool {
+        let usage = match self.get_context_usage(conversation_id.to_string()) {
+            Ok(u) => u,
+            Err(_) => return false,
+        };
+
+        // Get model config for threshold
+        let threshold = self.get_workspace_for_conversation(conversation_id)
+            .and_then(|ws_id| {
+                let workspaces = self.workspaces.read();
+                workspaces.get(&ws_id).and_then(|ws| {
+                    ws.llm_config.as_ref().and_then(|config| {
+                        let model_configs = self.model_context_configs.read();
+                        model_configs.get(&config.model).map(|c| c.warning_threshold)
+                    })
+                })
+            })
+            .unwrap_or(0.8);
+
+        if let Some(percent) = usage.usage_percent {
+            if percent >= threshold * 100.0 {
+                callback.on_context_warning(usage);
+                return true;
+            }
+        }
+
+        false
+    }
+
     /// Truncate oldest messages to fit within token limit.
     /// Keeps most recent messages, drops oldest.
     fn truncate_oldest(&self, conversation_id: &str, target_tokens: u32) {
@@ -1263,6 +1298,9 @@ impl MuxEngine {
 
                         // Persist to disk
                         self.save_messages(&conversation_id);
+
+                        // Check context warning before completing
+                        self.check_and_warn_context(&conversation_id, callback.as_ref().as_ref());
 
                         return Ok(ChatResult {
                             conversation_id: conversation_id.clone(),
@@ -1596,6 +1634,9 @@ impl MuxEngine {
             }
             self.save_messages(&conversation_id);
         }
+
+        // Check context warning before completing
+        self.check_and_warn_context(&conversation_id, callback.as_ref().as_ref());
 
         Ok(ChatResult {
             conversation_id: conversation_id.clone(),
