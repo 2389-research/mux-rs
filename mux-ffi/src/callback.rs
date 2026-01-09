@@ -20,6 +20,7 @@ pub struct ChatResult {
     pub tool_use_count: u32,
     pub input_tokens: u32,
     pub output_tokens: u32,
+    pub context_usage: crate::context::ContextUsage,
 }
 
 /// Callback interface that Swift implements to receive streaming chat updates.

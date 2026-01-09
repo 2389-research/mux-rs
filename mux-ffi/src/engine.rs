@@ -1055,6 +1055,7 @@ impl MuxEngine {
                             tool_use_count: 0,
                             input_tokens: 0,
                             output_tokens: 0,
+                            context_usage: Default::default(),
                         });
                     }
                 }
@@ -1387,6 +1388,7 @@ impl MuxEngine {
             tool_use_count: total_tool_use_count,
             input_tokens: total_input_tokens,
             output_tokens: total_output_tokens,
+            context_usage: Default::default(),
         })
     }
 
