@@ -1091,6 +1091,45 @@ impl MuxEngine {
         })
     }
 
+    /// Truncate oldest messages to fit within token limit.
+    /// Keeps most recent messages, drops oldest.
+    fn truncate_oldest(&self, conversation_id: &str, target_tokens: u32) {
+        let mut history = self.message_history.write();
+        if let Some(messages) = history.get_mut(conversation_id) {
+            // Calculate tokens from end, keep messages that fit
+            let mut kept_tokens = 0u32;
+            let mut keep_from = messages.len();
+
+            for (i, msg) in messages.iter().enumerate().rev() {
+                let msg_tokens: u32 = msg
+                    .content
+                    .iter()
+                    .map(|block| match block {
+                        mux::llm::ContentBlock::Text { text } => estimate_tokens(text),
+                        mux::llm::ContentBlock::ToolUse { input, .. } => {
+                            estimate_tokens(&input.to_string())
+                        }
+                        mux::llm::ContentBlock::ToolResult { content, .. } => {
+                            estimate_tokens(content)
+                        }
+                    })
+                    .sum();
+
+                if kept_tokens + msg_tokens <= target_tokens {
+                    kept_tokens += msg_tokens;
+                    keep_from = i;
+                } else {
+                    break;
+                }
+            }
+
+            // Remove messages before keep_from
+            if keep_from > 0 {
+                messages.drain(0..keep_from);
+            }
+        }
+    }
+
     async fn do_send_message(
         &self,
         conversation_id: String,
