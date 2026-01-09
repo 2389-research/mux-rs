@@ -206,4 +206,21 @@ mod tests {
         assert_eq!(retrieved.context_limit, 4096);
         assert_eq!(retrieved.compaction_mode, CompactionMode::TruncateOldest);
     }
+
+    #[test]
+    fn test_clear_context() {
+        let engine = MuxEngine::new("/tmp/mux-test-clear".to_string()).unwrap();
+        let ws = engine.create_workspace("Test".to_string(), None).unwrap();
+        let conv = engine.create_conversation(ws.id.clone(), "Test Conv".to_string()).unwrap();
+
+        // Clear should work on empty conversation
+        engine.clear_context(conv.id.clone()).unwrap();
+
+        // Clear nonexistent should fail
+        let result = engine.clear_context("nonexistent".to_string());
+        assert!(result.is_err());
+
+        // Cleanup
+        engine.delete_workspace(ws.id).unwrap();
+    }
 }

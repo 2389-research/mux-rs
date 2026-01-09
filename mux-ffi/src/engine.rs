@@ -499,6 +499,37 @@ impl MuxEngine {
         Ok(ContextUsage::new(message_count, estimated_tokens, context_limit))
     }
 
+    /// Clear conversation context (start fresh, keep conversation ID).
+    /// Useful when context is full and user wants to start over.
+    #[uniffi::method]
+    pub fn clear_context(&self, conversation_id: String) -> Result<(), MuxFfiError> {
+        // Check conversation exists
+        let conversations = self.conversations.read();
+        let exists = conversations
+            .values()
+            .flatten()
+            .any(|c| c.id == conversation_id);
+        if !exists {
+            return Err(MuxFfiError::Engine {
+                message: format!("Conversation not found: {}", conversation_id),
+            });
+        }
+        drop(conversations);
+
+        // Clear message history
+        {
+            let mut history = self.message_history.write();
+            if let Some(messages) = history.get_mut(&conversation_id) {
+                messages.clear();
+            }
+        }
+
+        // Persist cleared state
+        self.save_messages(&conversation_id);
+
+        Ok(())
+    }
+
     /// Register a custom tool from Swift
     pub fn register_custom_tool(
         &self,
