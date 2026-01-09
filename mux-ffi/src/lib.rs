@@ -50,6 +50,7 @@ pub fn version() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::context::{CompactionMode, ModelContextConfig};
     use crate::types::AgentConfig;
 
     #[test]
@@ -181,5 +182,28 @@ mod tests {
         let engine = MuxEngine::new("/tmp/mux-test-unreg".to_string()).unwrap();
         let result = engine.unregister_agent("nonexistent".to_string());
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_model_context_config() {
+        let engine = MuxEngine::new("/tmp/mux-test-context".to_string()).unwrap();
+
+        // Default config
+        let default_config = engine.get_model_context_config("unknown-model".to_string());
+        assert_eq!(default_config.context_limit, 0);
+        assert_eq!(default_config.compaction_mode, CompactionMode::Summarize);
+
+        // Set custom config
+        let config = ModelContextConfig {
+            model: "foundation-3b".to_string(),
+            context_limit: 4096,
+            compaction_mode: CompactionMode::TruncateOldest,
+            warning_threshold: 0.8,
+        };
+        engine.set_model_context_config(config.clone());
+
+        let retrieved = engine.get_model_context_config("foundation-3b".to_string());
+        assert_eq!(retrieved.context_limit, 4096);
+        assert_eq!(retrieved.compaction_mode, CompactionMode::TruncateOldest);
     }
 }

@@ -439,6 +439,31 @@ impl MuxEngine {
         self.callback_providers.read().keys().cloned().collect()
     }
 
+    /// Set context configuration for a specific model.
+    /// Call this during app init to configure small context models.
+    #[uniffi::method]
+    pub fn set_model_context_config(&self, config: ModelContextConfig) {
+        self.model_context_configs
+            .write()
+            .insert(config.model.clone(), config);
+    }
+
+    /// Get context configuration for a model.
+    /// Returns a default config if not explicitly set.
+    #[uniffi::method]
+    pub fn get_model_context_config(&self, model: String) -> ModelContextConfig {
+        self.model_context_configs
+            .read()
+            .get(&model)
+            .cloned()
+            .unwrap_or_else(|| ModelContextConfig {
+                model,
+                context_limit: 0, // 0 means no limit
+                compaction_mode: CompactionMode::Summarize,
+                warning_threshold: 0.8,
+            })
+    }
+
     /// Register a custom tool from Swift
     pub fn register_custom_tool(
         &self,
