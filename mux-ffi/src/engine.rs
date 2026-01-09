@@ -7,7 +7,7 @@ use crate::callback::{
     SubagentEventHandler, ToolUseRequest,
 };
 use crate::callback_client::CallbackLlmClient;
-use crate::context::{CompactionMode, ContextUsage, ModelContextConfig, effective_limit, estimate_tokens};
+use crate::context::{CompactionMode, ContextUsage, ModelContextConfig, estimate_tokens};
 use crate::task_tool::FfiTaskTool;
 use crate::types::{
     AgentConfig, ApprovalDecision, Conversation, McpServerConfig, McpTransportType, Provider,
@@ -462,6 +462,41 @@ impl MuxEngine {
                 compaction_mode: CompactionMode::Summarize,
                 warning_threshold: 0.8,
             })
+    }
+
+    /// Get current context usage for a conversation.
+    #[uniffi::method]
+    pub fn get_context_usage(&self, conversation_id: String) -> Result<ContextUsage, MuxFfiError> {
+        // Check conversation exists
+        let conversations = self.conversations.read();
+        let exists = conversations
+            .values()
+            .flatten()
+            .any(|c| c.id == conversation_id);
+        if !exists {
+            return Err(MuxFfiError::Engine {
+                message: format!("Conversation not found: {}", conversation_id),
+            });
+        }
+        drop(conversations);
+
+        let (message_count, estimated_tokens) = self.estimate_conversation_tokens(&conversation_id);
+
+        // Get workspace to find model
+        let workspace_id = self.get_workspace_for_conversation(&conversation_id);
+        let context_limit = if let Some(ws_id) = workspace_id {
+            let workspaces = self.workspaces.read();
+            workspaces.get(&ws_id).and_then(|ws| {
+                ws.llm_config.as_ref().and_then(|config| {
+                    let model_config = self.model_context_configs.read();
+                    model_config.get(&config.model).map(|c| c.context_limit)
+                })
+            })
+        } else {
+            None
+        };
+
+        Ok(ContextUsage::new(message_count, estimated_tokens, context_limit))
     }
 
     /// Register a custom tool from Swift
@@ -964,6 +999,34 @@ impl MuxEngine {
 }
 
 impl MuxEngine {
+    /// Estimate total tokens in a conversation's message history
+    fn estimate_conversation_tokens(&self, conversation_id: &str) -> (u32, u32) {
+        let history = self.message_history.read();
+        if let Some(messages) = history.get(conversation_id) {
+            let message_count = messages.len() as u32;
+            let total_tokens: u32 = messages
+                .iter()
+                .map(|m| {
+                    m.content
+                        .iter()
+                        .map(|block| match block {
+                            mux::llm::ContentBlock::Text { text } => estimate_tokens(text),
+                            mux::llm::ContentBlock::ToolUse { input, .. } => {
+                                estimate_tokens(&input.to_string())
+                            }
+                            mux::llm::ContentBlock::ToolResult { content, .. } => {
+                                estimate_tokens(content)
+                            }
+                        })
+                        .sum::<u32>()
+                })
+                .sum();
+            (message_count, total_tokens)
+        } else {
+            (0, 0)
+        }
+    }
+
     /// Get the configured model for a conversation's workspace
     fn get_model_for_conversation(&self, conversation_id: &str) -> Option<String> {
         // Find workspace for this conversation
