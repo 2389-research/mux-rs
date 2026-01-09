@@ -223,4 +223,40 @@ mod tests {
         // Cleanup
         engine.delete_workspace(ws.id).unwrap();
     }
+
+    #[test]
+    fn test_context_workflow() {
+        let engine = MuxEngine::new("/tmp/mux-test-context-flow".to_string()).unwrap();
+
+        // Create workspace with model config
+        let ws = engine.create_workspace("Context Test".to_string(), None).unwrap();
+
+        // Configure small context model
+        engine.set_model_context_config(ModelContextConfig {
+            model: "test-small-model".to_string(),
+            context_limit: 100, // Very small for testing
+            compaction_mode: CompactionMode::TruncateOldest,
+            warning_threshold: 0.5,
+        });
+
+        // Create conversation
+        let conv = engine
+            .create_conversation(ws.id.clone(), "Context Test".to_string())
+            .unwrap();
+
+        // Check initial usage
+        let usage = engine.get_context_usage(conv.id.clone()).unwrap();
+        assert_eq!(usage.message_count, 0);
+        assert_eq!(usage.estimated_tokens, 0);
+
+        // Clear context works
+        engine.clear_context(conv.id.clone()).unwrap();
+
+        // Compact context works (no-op on empty)
+        let usage = engine.compact_context(conv.id.clone()).unwrap();
+        assert_eq!(usage.message_count, 0);
+
+        // Cleanup
+        engine.delete_workspace(ws.id).unwrap();
+    }
 }
