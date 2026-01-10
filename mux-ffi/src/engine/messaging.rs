@@ -885,4 +885,401 @@ mod tests {
 
         engine.clear_subagent_event_handler();
     }
+
+    // ========================================================================
+    // Mock LLM Provider for testing the agentic loop
+    // ========================================================================
+
+    use crate::callback::LlmProvider;
+    use crate::types::{LlmRequest, LlmResponse, LlmToolCall, LlmUsage};
+    use std::sync::atomic::AtomicU32;
+
+    /// Mock LLM provider that returns canned responses.
+    /// Can be configured to return text-only or tool calls.
+    struct MockLlmProvider {
+        responses: std::sync::Mutex<Vec<LlmResponse>>,
+        call_count: AtomicU32,
+    }
+
+    impl MockLlmProvider {
+        fn new(responses: Vec<LlmResponse>) -> Self {
+            Self {
+                responses: std::sync::Mutex::new(responses),
+                call_count: AtomicU32::new(0),
+            }
+        }
+
+        /// Create a simple text-only response
+        fn text_response(text: &str) -> LlmResponse {
+            LlmResponse {
+                text: text.to_string(),
+                tool_calls: vec![],
+                usage: LlmUsage {
+                    input_tokens: 10,
+                    output_tokens: 20,
+                },
+                error: None,
+            }
+        }
+
+        /// Create a response with a tool call
+        fn tool_call_response(tool_name: &str, args: &str) -> LlmResponse {
+            LlmResponse {
+                text: String::new(),
+                tool_calls: vec![LlmToolCall {
+                    id: format!("tool_{}", uuid::Uuid::new_v4()),
+                    name: tool_name.to_string(),
+                    arguments: args.to_string(),
+                }],
+                usage: LlmUsage {
+                    input_tokens: 10,
+                    output_tokens: 5,
+                },
+                error: None,
+            }
+        }
+
+        #[allow(dead_code)]
+        fn get_call_count(&self) -> u32 {
+            self.call_count.load(Ordering::SeqCst)
+        }
+    }
+
+    impl LlmProvider for MockLlmProvider {
+        fn generate(&self, _request: LlmRequest) -> LlmResponse {
+            let count = self.call_count.fetch_add(1, Ordering::SeqCst);
+            let responses = self.responses.lock().unwrap();
+
+            if (count as usize) < responses.len() {
+                responses[count as usize].clone()
+            } else if !responses.is_empty() {
+                // Return last response if we've exhausted the list
+                responses.last().unwrap().clone()
+            } else {
+                // Default: return simple text
+                MockLlmProvider::text_response("Default mock response")
+            }
+        }
+    }
+
+    // Helper to create a wrapper struct for ChatCallback forwarding
+    struct CallbackWrapper(Arc<TrackingCallback>);
+
+    impl ChatCallback for CallbackWrapper {
+        fn on_text_delta(&self, text: String) {
+            self.0.on_text_delta(text);
+        }
+        fn on_tool_use(&self, r: ToolUseRequest) {
+            self.0.on_tool_use(r);
+        }
+        fn on_tool_result(&self, id: String, result: String) {
+            self.0.on_tool_result(id, result);
+        }
+        fn on_complete(&self, r: ChatResult) {
+            self.0.on_complete(r);
+        }
+        fn on_error(&self, e: String) {
+            self.0.on_error(e);
+        }
+        fn on_context_warning(&self, u: ContextUsage) {
+            self.0.on_context_warning(u);
+        }
+    }
+
+    #[test]
+    fn test_do_send_message_with_mock_llm_simple_text() {
+        let engine = create_test_engine();
+        let ws = engine
+            .create_workspace("MockLLM Test".to_string(), None)
+            .unwrap();
+        let conv = engine
+            .create_conversation(ws.id.clone(), "Test Conv".to_string())
+            .unwrap();
+
+        // Register mock LLM provider
+        let mock_provider = MockLlmProvider::new(vec![
+            MockLlmProvider::text_response("Hello from mock LLM!"),
+        ]);
+        engine.register_llm_provider("mock-llm".to_string(), Box::new(mock_provider));
+
+        // Set custom provider
+        engine.set_default_provider(Provider::Custom {
+            name: "mock-llm".to_string(),
+        });
+
+        let callback = Arc::new(TrackingCallback::new());
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let result = rt.block_on(engine.do_send_message(
+            conv.id.clone(),
+            "Hi there".to_string(),
+            Arc::new(Box::new(CallbackWrapper(callback.clone()))),
+        ));
+
+        assert!(result.is_ok());
+        let chat_result = result.unwrap();
+
+        // Verify the response
+        assert_eq!(chat_result.final_text, "Hello from mock LLM!");
+        assert_eq!(chat_result.tool_use_count, 0);
+        assert_eq!(chat_result.input_tokens, 10);
+        assert_eq!(chat_result.output_tokens, 20);
+
+        // Verify callback received the text
+        let text = callback.text_received.lock().unwrap();
+        assert!(text.contains("Hello from mock LLM!"));
+
+        engine.delete_workspace(ws.id).unwrap();
+    }
+
+    #[test]
+    fn test_do_send_message_with_mock_llm_tool_use() {
+        let engine = create_test_engine();
+        let ws = engine
+            .create_workspace("MockLLM Tool Test".to_string(), None)
+            .unwrap();
+        let conv = engine
+            .create_conversation(ws.id.clone(), "Test Conv".to_string())
+            .unwrap();
+
+        // Register mock LLM that first calls a tool, then responds with text
+        let mock_provider = MockLlmProvider::new(vec![
+            // First call: request read_file tool
+            MockLlmProvider::tool_call_response("read_file", r#"{"path": "/tmp/test.txt"}"#),
+            // Second call: after tool result, return final text
+            MockLlmProvider::text_response("I read the file successfully!"),
+        ]);
+        engine.register_llm_provider("mock-tool-llm".to_string(), Box::new(mock_provider));
+
+        engine.set_default_provider(Provider::Custom {
+            name: "mock-tool-llm".to_string(),
+        });
+
+        let callback = Arc::new(TrackingCallback::new());
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let result = rt.block_on(engine.do_send_message(
+            conv.id.clone(),
+            "Read that file for me".to_string(),
+            Arc::new(Box::new(CallbackWrapper(callback.clone()))),
+        ));
+
+        assert!(result.is_ok());
+        let chat_result = result.unwrap();
+
+        // Should have used one tool
+        assert_eq!(chat_result.tool_use_count, 1);
+        assert_eq!(chat_result.final_text, "I read the file successfully!");
+
+        engine.delete_workspace(ws.id).unwrap();
+    }
+
+    #[test]
+    fn test_do_send_message_accumulates_tokens() {
+        let engine = create_test_engine();
+        let ws = engine
+            .create_workspace("Token Test".to_string(), None)
+            .unwrap();
+        let conv = engine
+            .create_conversation(ws.id.clone(), "Test Conv".to_string())
+            .unwrap();
+
+        // Multiple iterations accumulate tokens
+        let mock_provider = MockLlmProvider::new(vec![
+            LlmResponse {
+                text: String::new(),
+                tool_calls: vec![LlmToolCall {
+                    id: "tool_1".to_string(),
+                    name: "read_file".to_string(),
+                    arguments: r#"{"path": "/tmp/a.txt"}"#.to_string(),
+                }],
+                usage: LlmUsage {
+                    input_tokens: 100,
+                    output_tokens: 50,
+                },
+                error: None,
+            },
+            LlmResponse {
+                text: "Done!".to_string(),
+                tool_calls: vec![],
+                usage: LlmUsage {
+                    input_tokens: 200,
+                    output_tokens: 75,
+                },
+                error: None,
+            },
+        ]);
+        engine.register_llm_provider("token-test".to_string(), Box::new(mock_provider));
+        engine.set_default_provider(Provider::Custom {
+            name: "token-test".to_string(),
+        });
+
+        let callback = Arc::new(TrackingCallback::new());
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let result = rt.block_on(engine.do_send_message(
+            conv.id.clone(),
+            "Do something".to_string(),
+            Arc::new(Box::new(CallbackWrapper(callback.clone()))),
+        ));
+
+        assert!(result.is_ok());
+        let chat_result = result.unwrap();
+
+        // Tokens should be accumulated: 100+200 input, 50+75 output
+        assert_eq!(chat_result.input_tokens, 300);
+        assert_eq!(chat_result.output_tokens, 125);
+
+        engine.delete_workspace(ws.id).unwrap();
+    }
+
+    #[test]
+    fn test_do_send_message_max_iterations_limit() {
+        let engine = create_test_engine();
+        let ws = engine
+            .create_workspace("Max Iter Test".to_string(), None)
+            .unwrap();
+        let conv = engine
+            .create_conversation(ws.id.clone(), "Test Conv".to_string())
+            .unwrap();
+
+        // Mock that always returns tool calls - should hit MAX_AGENTIC_ITERATIONS
+        let mock_provider = MockLlmProvider::new(vec![
+            MockLlmProvider::tool_call_response("read_file", r#"{"path": "/tmp/loop.txt"}"#),
+        ]);
+        engine.register_llm_provider("loop-test".to_string(), Box::new(mock_provider));
+        engine.set_default_provider(Provider::Custom {
+            name: "loop-test".to_string(),
+        });
+
+        let callback = Arc::new(TrackingCallback::new());
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let result = rt.block_on(engine.do_send_message(
+            conv.id.clone(),
+            "Loop forever".to_string(),
+            Arc::new(Box::new(CallbackWrapper(callback.clone()))),
+        ));
+
+        assert!(result.is_ok());
+        let chat_result = result.unwrap();
+
+        // Should have hit the limit (50 iterations)
+        assert!(chat_result.tool_use_count >= 49); // At least 49 tool uses
+        assert!(chat_result.final_text.contains("terminated after"));
+        assert!(chat_result.final_text.contains("50 iterations"));
+
+        engine.delete_workspace(ws.id).unwrap();
+    }
+
+    #[test]
+    fn test_do_send_message_llm_error_response() {
+        let engine = create_test_engine();
+        let ws = engine
+            .create_workspace("Error Test".to_string(), None)
+            .unwrap();
+        let conv = engine
+            .create_conversation(ws.id.clone(), "Test Conv".to_string())
+            .unwrap();
+
+        // Mock that returns an error
+        let mock_provider = MockLlmProvider::new(vec![LlmResponse {
+            text: String::new(),
+            tool_calls: vec![],
+            usage: LlmUsage::default(),
+            error: Some("Rate limit exceeded".to_string()),
+        }]);
+        engine.register_llm_provider("error-test".to_string(), Box::new(mock_provider));
+        engine.set_default_provider(Provider::Custom {
+            name: "error-test".to_string(),
+        });
+
+        let callback = Arc::new(TrackingCallback::new());
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let result = rt.block_on(engine.do_send_message(
+            conv.id.clone(),
+            "Trigger error".to_string(),
+            Arc::new(Box::new(CallbackWrapper(callback.clone()))),
+        ));
+
+        // LLM errors are propagated
+        assert!(result.is_err());
+        let error = result.unwrap_err();
+        assert!(error.contains("Rate limit exceeded"));
+
+        engine.delete_workspace(ws.id).unwrap();
+    }
+
+    #[test]
+    fn test_do_send_message_preserves_conversation_history() {
+        let engine = create_test_engine();
+        let ws = engine
+            .create_workspace("History Test".to_string(), None)
+            .unwrap();
+        let conv = engine
+            .create_conversation(ws.id.clone(), "Test Conv".to_string())
+            .unwrap();
+
+        // Track how many messages have been sent
+        let call_count = Arc::new(AtomicU32::new(0));
+        let call_count_clone = call_count.clone();
+
+        struct HistoryCheckingProvider {
+            call_count: Arc<AtomicU32>,
+        }
+
+        impl LlmProvider for HistoryCheckingProvider {
+            fn generate(&self, request: LlmRequest) -> LlmResponse {
+                let count = self.call_count.fetch_add(1, Ordering::SeqCst);
+
+                // First call should have 1 message, second call should have 3
+                // (user, assistant from first call, new user)
+                if count == 0 {
+                    assert_eq!(request.messages.len(), 1);
+                } else if count == 1 {
+                    // After first response: user + assistant + new user = 3
+                    assert!(request.messages.len() >= 2);
+                }
+
+                LlmResponse {
+                    text: format!("Response {}", count),
+                    tool_calls: vec![],
+                    usage: LlmUsage {
+                        input_tokens: 10,
+                        output_tokens: 10,
+                    },
+                    error: None,
+                }
+            }
+        }
+
+        let provider = HistoryCheckingProvider {
+            call_count: call_count_clone,
+        };
+        engine.register_llm_provider("history-test".to_string(), Box::new(provider));
+        engine.set_default_provider(Provider::Custom {
+            name: "history-test".to_string(),
+        });
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+
+        // First message
+        let callback1 = Arc::new(TrackingCallback::new());
+        let result1 = rt.block_on(engine.do_send_message(
+            conv.id.clone(),
+            "First message".to_string(),
+            Arc::new(Box::new(CallbackWrapper(callback1.clone()))),
+        ));
+        assert!(result1.is_ok());
+
+        // Second message - should include history
+        let callback2 = Arc::new(TrackingCallback::new());
+        let result2 = rt.block_on(engine.do_send_message(
+            conv.id.clone(),
+            "Second message".to_string(),
+            Arc::new(Box::new(CallbackWrapper(callback2.clone()))),
+        ));
+        assert!(result2.is_ok());
+
+        // Verify we made 2 calls total
+        assert_eq!(call_count.load(Ordering::SeqCst), 2);
+
+        engine.delete_workspace(ws.id).unwrap();
+    }
 }

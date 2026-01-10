@@ -38,6 +38,16 @@ impl McpClient {
         })
     }
 
+    /// Create an MCP client with a custom transport.
+    /// Useful for testing or custom transport implementations.
+    pub fn from_transport(config: McpServerConfig, transport: Arc<dyn Transport>) -> Self {
+        Self {
+            config,
+            transport,
+            capabilities: McpServerCapabilities::default(),
+        }
+    }
+
     /// Get the server name.
     pub fn name(&self) -> &str {
         &self.config.name
