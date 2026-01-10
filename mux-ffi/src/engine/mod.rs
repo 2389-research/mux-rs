@@ -712,18 +712,7 @@ impl MuxEngine {
 
     /// Find the MCP client and tool name for a qualified tool name (server:tool).
     fn parse_tool_name(&self, qualified_name: &str) -> Option<(String, String)> {
-        parse_qualified_tool_name(qualified_name)
-    }
-}
-
-/// Parse a qualified tool name (server:tool) into its components.
-/// Returns None if the name doesn't contain a colon separator.
-pub(crate) fn parse_qualified_tool_name(qualified_name: &str) -> Option<(String, String)> {
-    let parts: Vec<&str> = qualified_name.splitn(2, ':').collect();
-    if parts.len() == 2 {
-        Some((parts[0].to_string(), parts[1].to_string()))
-    } else {
-        None
+        helpers::parse_qualified_tool_name(qualified_name)
     }
 }
 

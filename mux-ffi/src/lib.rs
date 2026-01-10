@@ -261,31 +261,6 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_qualified_tool_name() {
-        use crate::engine::parse_qualified_tool_name;
-
-        // Valid qualified names
-        let result = parse_qualified_tool_name("server:tool");
-        assert_eq!(result, Some(("server".to_string(), "tool".to_string())));
-
-        // Tool name with colons (splitn(2) keeps rest together)
-        let result = parse_qualified_tool_name("mcp:read:file");
-        assert_eq!(result, Some(("mcp".to_string(), "read:file".to_string())));
-
-        // Empty server name
-        let result = parse_qualified_tool_name(":tool");
-        assert_eq!(result, Some(("".to_string(), "tool".to_string())));
-
-        // No colon - returns None (builtin tool)
-        let result = parse_qualified_tool_name("read_file");
-        assert_eq!(result, None);
-
-        // Empty string
-        let result = parse_qualified_tool_name("");
-        assert_eq!(result, None);
-    }
-
-    #[test]
     fn test_context_usage_with_messages() {
         use mux::prelude::Role;
 
