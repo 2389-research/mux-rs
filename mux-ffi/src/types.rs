@@ -141,7 +141,7 @@ pub struct ToolInfo {
     pub server_name: String,
 }
 
-#[derive(Debug, Clone, uniffi::Enum)]
+#[derive(Debug, Clone, PartialEq, uniffi::Enum)]
 pub enum ApprovalDecision {
     Allow,
     AlwaysAllow,

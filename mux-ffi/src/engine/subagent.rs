@@ -358,3 +358,444 @@ impl MuxEngine {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    // Mock handler that tracks calls
+    struct TrackingHandler {
+        started_count: AtomicU32,
+        tool_use_count: AtomicU32,
+        tool_result_count: AtomicU32,
+        iteration_count: AtomicU32,
+        completed_count: AtomicU32,
+        error_count: AtomicU32,
+    }
+
+    impl TrackingHandler {
+        fn new() -> Self {
+            Self {
+                started_count: AtomicU32::new(0),
+                tool_use_count: AtomicU32::new(0),
+                tool_result_count: AtomicU32::new(0),
+                iteration_count: AtomicU32::new(0),
+                completed_count: AtomicU32::new(0),
+                error_count: AtomicU32::new(0),
+            }
+        }
+    }
+
+    impl SubagentEventHandler for TrackingHandler {
+        fn on_agent_started(&self, _: String, _: String, _: String, _: String) {
+            self.started_count.fetch_add(1, Ordering::SeqCst);
+        }
+        fn on_tool_use(&self, _: String, _: String, _: String) {
+            self.tool_use_count.fetch_add(1, Ordering::SeqCst);
+        }
+        fn on_tool_result(&self, _: String, _: String, _: String, _: bool) {
+            self.tool_result_count.fetch_add(1, Ordering::SeqCst);
+        }
+        fn on_iteration(&self, _: String, _: u32) {
+            self.iteration_count.fetch_add(1, Ordering::SeqCst);
+        }
+        fn on_agent_completed(&self, _: String, _: String, _: u32, _: u32, _: bool) {
+            self.completed_count.fetch_add(1, Ordering::SeqCst);
+        }
+        fn on_agent_error(&self, _: String, _: String) {
+            self.error_count.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    #[test]
+    fn test_task_tool_event_proxy_forwards_on_agent_started() {
+        let handler = Arc::new(TrackingHandler::new());
+        let engine_handler: Arc<RwLock<Option<Box<dyn SubagentEventHandler>>>> =
+            Arc::new(RwLock::new(Some(Box::new(TrackingHandler::new()))));
+
+        // Replace with our tracking handler
+        *engine_handler.write() = Some(Box::new({
+            struct ForwardToArc(Arc<TrackingHandler>);
+            impl SubagentEventHandler for ForwardToArc {
+                fn on_agent_started(&self, a: String, b: String, c: String, d: String) {
+                    self.0.on_agent_started(a, b, c, d);
+                }
+                fn on_tool_use(&self, a: String, b: String, c: String) {
+                    self.0.on_tool_use(a, b, c);
+                }
+                fn on_tool_result(&self, a: String, b: String, c: String, d: bool) {
+                    self.0.on_tool_result(a, b, c, d);
+                }
+                fn on_iteration(&self, a: String, b: u32) {
+                    self.0.on_iteration(a, b);
+                }
+                fn on_agent_completed(&self, a: String, b: String, c: u32, d: u32, e: bool) {
+                    self.0.on_agent_completed(a, b, c, d, e);
+                }
+                fn on_agent_error(&self, a: String, b: String) {
+                    self.0.on_agent_error(a, b);
+                }
+            }
+            ForwardToArc(handler.clone())
+        }));
+
+        let proxy = TaskToolEventProxy {
+            engine_handler: engine_handler.clone(),
+        };
+
+        proxy.on_agent_started("id".into(), "type".into(), "task".into(), "desc".into());
+        assert_eq!(handler.started_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn test_task_tool_event_proxy_forwards_on_tool_use() {
+        let handler = Arc::new(TrackingHandler::new());
+        let engine_handler: Arc<RwLock<Option<Box<dyn SubagentEventHandler>>>> =
+            Arc::new(RwLock::new(None));
+
+        struct ForwardToArc(Arc<TrackingHandler>);
+        impl SubagentEventHandler for ForwardToArc {
+            fn on_agent_started(&self, _: String, _: String, _: String, _: String) {}
+            fn on_tool_use(&self, a: String, b: String, c: String) {
+                self.0.on_tool_use(a, b, c);
+            }
+            fn on_tool_result(&self, _: String, _: String, _: String, _: bool) {}
+            fn on_iteration(&self, _: String, _: u32) {}
+            fn on_agent_completed(&self, _: String, _: String, _: u32, _: u32, _: bool) {}
+            fn on_agent_error(&self, _: String, _: String) {}
+        }
+        *engine_handler.write() = Some(Box::new(ForwardToArc(handler.clone())));
+
+        let proxy = TaskToolEventProxy {
+            engine_handler: engine_handler.clone(),
+        };
+
+        proxy.on_tool_use("id".into(), "tool".into(), "{}".into());
+        assert_eq!(handler.tool_use_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn test_task_tool_event_proxy_forwards_on_tool_result() {
+        let handler = Arc::new(TrackingHandler::new());
+        let engine_handler: Arc<RwLock<Option<Box<dyn SubagentEventHandler>>>> =
+            Arc::new(RwLock::new(None));
+
+        struct ForwardToArc(Arc<TrackingHandler>);
+        impl SubagentEventHandler for ForwardToArc {
+            fn on_agent_started(&self, _: String, _: String, _: String, _: String) {}
+            fn on_tool_use(&self, _: String, _: String, _: String) {}
+            fn on_tool_result(&self, a: String, b: String, c: String, d: bool) {
+                self.0.on_tool_result(a, b, c, d);
+            }
+            fn on_iteration(&self, _: String, _: u32) {}
+            fn on_agent_completed(&self, _: String, _: String, _: u32, _: u32, _: bool) {}
+            fn on_agent_error(&self, _: String, _: String) {}
+        }
+        *engine_handler.write() = Some(Box::new(ForwardToArc(handler.clone())));
+
+        let proxy = TaskToolEventProxy {
+            engine_handler: engine_handler.clone(),
+        };
+
+        proxy.on_tool_result("id".into(), "tool".into(), "result".into(), false);
+        assert_eq!(handler.tool_result_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn test_task_tool_event_proxy_forwards_on_iteration() {
+        let handler = Arc::new(TrackingHandler::new());
+        let engine_handler: Arc<RwLock<Option<Box<dyn SubagentEventHandler>>>> =
+            Arc::new(RwLock::new(None));
+
+        struct ForwardToArc(Arc<TrackingHandler>);
+        impl SubagentEventHandler for ForwardToArc {
+            fn on_agent_started(&self, _: String, _: String, _: String, _: String) {}
+            fn on_tool_use(&self, _: String, _: String, _: String) {}
+            fn on_tool_result(&self, _: String, _: String, _: String, _: bool) {}
+            fn on_iteration(&self, a: String, b: u32) {
+                self.0.on_iteration(a, b);
+            }
+            fn on_agent_completed(&self, _: String, _: String, _: u32, _: u32, _: bool) {}
+            fn on_agent_error(&self, _: String, _: String) {}
+        }
+        *engine_handler.write() = Some(Box::new(ForwardToArc(handler.clone())));
+
+        let proxy = TaskToolEventProxy {
+            engine_handler: engine_handler.clone(),
+        };
+
+        proxy.on_iteration("id".into(), 5);
+        assert_eq!(handler.iteration_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn test_task_tool_event_proxy_forwards_on_agent_completed() {
+        let handler = Arc::new(TrackingHandler::new());
+        let engine_handler: Arc<RwLock<Option<Box<dyn SubagentEventHandler>>>> =
+            Arc::new(RwLock::new(None));
+
+        struct ForwardToArc(Arc<TrackingHandler>);
+        impl SubagentEventHandler for ForwardToArc {
+            fn on_agent_started(&self, _: String, _: String, _: String, _: String) {}
+            fn on_tool_use(&self, _: String, _: String, _: String) {}
+            fn on_tool_result(&self, _: String, _: String, _: String, _: bool) {}
+            fn on_iteration(&self, _: String, _: u32) {}
+            fn on_agent_completed(&self, a: String, b: String, c: u32, d: u32, e: bool) {
+                self.0.on_agent_completed(a, b, c, d, e);
+            }
+            fn on_agent_error(&self, _: String, _: String) {}
+        }
+        *engine_handler.write() = Some(Box::new(ForwardToArc(handler.clone())));
+
+        let proxy = TaskToolEventProxy {
+            engine_handler: engine_handler.clone(),
+        };
+
+        proxy.on_agent_completed("id".into(), "content".into(), 3, 2, true);
+        assert_eq!(handler.completed_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn test_task_tool_event_proxy_forwards_on_agent_error() {
+        let handler = Arc::new(TrackingHandler::new());
+        let engine_handler: Arc<RwLock<Option<Box<dyn SubagentEventHandler>>>> =
+            Arc::new(RwLock::new(None));
+
+        struct ForwardToArc(Arc<TrackingHandler>);
+        impl SubagentEventHandler for ForwardToArc {
+            fn on_agent_started(&self, _: String, _: String, _: String, _: String) {}
+            fn on_tool_use(&self, _: String, _: String, _: String) {}
+            fn on_tool_result(&self, _: String, _: String, _: String, _: bool) {}
+            fn on_iteration(&self, _: String, _: u32) {}
+            fn on_agent_completed(&self, _: String, _: String, _: u32, _: u32, _: bool) {}
+            fn on_agent_error(&self, a: String, b: String) {
+                self.0.on_agent_error(a, b);
+            }
+        }
+        *engine_handler.write() = Some(Box::new(ForwardToArc(handler.clone())));
+
+        let proxy = TaskToolEventProxy {
+            engine_handler: engine_handler.clone(),
+        };
+
+        proxy.on_agent_error("id".into(), "error message".into());
+        assert_eq!(handler.error_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn test_task_tool_event_proxy_no_handler() {
+        // When no handler is set, calls should not panic
+        let engine_handler: Arc<RwLock<Option<Box<dyn SubagentEventHandler>>>> =
+            Arc::new(RwLock::new(None));
+
+        let proxy = TaskToolEventProxy {
+            engine_handler: engine_handler.clone(),
+        };
+
+        // None of these should panic
+        proxy.on_agent_started("id".into(), "type".into(), "task".into(), "desc".into());
+        proxy.on_tool_use("id".into(), "tool".into(), "{}".into());
+        proxy.on_tool_result("id".into(), "tool".into(), "result".into(), false);
+        proxy.on_iteration("id".into(), 1);
+        proxy.on_agent_completed("id".into(), "content".into(), 0, 0, false);
+        proxy.on_agent_error("id".into(), "error".into());
+    }
+
+    #[test]
+    fn test_callback_proxy_hook_new() {
+        use crate::callback::SubagentCallback;
+
+        struct DummyCallback;
+        impl SubagentCallback for DummyCallback {
+            fn on_text_delta(&self, _: String, _: String) {}
+            fn on_tool_use(&self, _: String, _: ToolUseRequest) {}
+            fn on_tool_result(&self, _: String, _: String, _: String) {}
+            fn on_complete(&self, _: SubagentResult) {}
+            fn on_error(&self, _: String, _: String) {}
+        }
+
+        let callback: Arc<Box<dyn SubagentCallback>> = Arc::new(Box::new(DummyCallback));
+        let hook = CallbackProxyHook::new("agent-123".to_string(), callback);
+
+        assert_eq!(hook.agent_id, "agent-123");
+    }
+
+    #[test]
+    fn test_callback_proxy_hook_accepts_all() {
+        use crate::callback::SubagentCallback;
+        use mux::hook::{Hook, HookEvent};
+        use std::collections::HashMap;
+
+        struct DummyCallback;
+        impl SubagentCallback for DummyCallback {
+            fn on_text_delta(&self, _: String, _: String) {}
+            fn on_tool_use(&self, _: String, _: ToolUseRequest) {}
+            fn on_tool_result(&self, _: String, _: String, _: String) {}
+            fn on_complete(&self, _: SubagentResult) {}
+            fn on_error(&self, _: String, _: String) {}
+        }
+
+        let callback: Arc<Box<dyn SubagentCallback>> = Arc::new(Box::new(DummyCallback));
+        let hook = CallbackProxyHook::new("agent-123".to_string(), callback);
+
+        // Test that accepts returns true for various events
+        let pre_tool = HookEvent::PreToolUse {
+            tool_name: "test".to_string(),
+            input: serde_json::json!({}),
+        };
+        assert!(hook.accepts(&pre_tool));
+
+        let post_tool = HookEvent::PostToolUse {
+            tool_name: "test".to_string(),
+            input: serde_json::json!({}),
+            result: mux::tool::ToolResult {
+                content: "result".to_string(),
+                is_error: false,
+                metadata: HashMap::new(),
+            },
+        };
+        assert!(hook.accepts(&post_tool));
+
+        let iteration = HookEvent::Iteration {
+            agent_id: "agent-123".to_string(),
+            iteration: 1,
+        };
+        assert!(hook.accepts(&iteration));
+    }
+
+    #[test]
+    fn test_callback_proxy_hook_on_event_pre_tool_use() {
+        use crate::callback::SubagentCallback;
+        use mux::hook::{Hook, HookAction, HookEvent};
+        use std::sync::atomic::AtomicBool;
+
+        struct TrackingCallback {
+            tool_use_called: AtomicBool,
+        }
+        impl SubagentCallback for TrackingCallback {
+            fn on_text_delta(&self, _: String, _: String) {}
+            fn on_tool_use(&self, _: String, _: ToolUseRequest) {
+                self.tool_use_called.store(true, Ordering::SeqCst);
+            }
+            fn on_tool_result(&self, _: String, _: String, _: String) {}
+            fn on_complete(&self, _: SubagentResult) {}
+            fn on_error(&self, _: String, _: String) {}
+        }
+
+        let callback = Arc::new(TrackingCallback {
+            tool_use_called: AtomicBool::new(false),
+        });
+        let boxed: Arc<Box<dyn SubagentCallback>> = Arc::new(Box::new({
+            struct Wrapper(Arc<TrackingCallback>);
+            impl SubagentCallback for Wrapper {
+                fn on_text_delta(&self, _: String, _: String) {}
+                fn on_tool_use(&self, a: String, b: ToolUseRequest) {
+                    self.0.on_tool_use(a, b);
+                }
+                fn on_tool_result(&self, _: String, _: String, _: String) {}
+                fn on_complete(&self, _: SubagentResult) {}
+                fn on_error(&self, _: String, _: String) {}
+            }
+            Wrapper(callback.clone())
+        }));
+
+        let hook = CallbackProxyHook::new("agent-456".to_string(), boxed);
+
+        let event = HookEvent::PreToolUse {
+            tool_name: "read_file".to_string(),
+            input: serde_json::json!({"path": "/tmp/test"}),
+        };
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let result = rt.block_on(hook.on_event(&event)).unwrap();
+
+        assert!(matches!(result, HookAction::Continue));
+        assert!(callback.tool_use_called.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn test_callback_proxy_hook_on_event_post_tool_use() {
+        use crate::callback::SubagentCallback;
+        use mux::hook::{Hook, HookAction, HookEvent};
+        use std::collections::HashMap;
+        use std::sync::atomic::AtomicBool;
+
+        struct TrackingCallback {
+            tool_result_called: AtomicBool,
+        }
+        impl SubagentCallback for TrackingCallback {
+            fn on_text_delta(&self, _: String, _: String) {}
+            fn on_tool_use(&self, _: String, _: ToolUseRequest) {}
+            fn on_tool_result(&self, _: String, _: String, _: String) {
+                self.tool_result_called.store(true, Ordering::SeqCst);
+            }
+            fn on_complete(&self, _: SubagentResult) {}
+            fn on_error(&self, _: String, _: String) {}
+        }
+
+        let callback = Arc::new(TrackingCallback {
+            tool_result_called: AtomicBool::new(false),
+        });
+        let boxed: Arc<Box<dyn SubagentCallback>> = Arc::new(Box::new({
+            struct Wrapper(Arc<TrackingCallback>);
+            impl SubagentCallback for Wrapper {
+                fn on_text_delta(&self, _: String, _: String) {}
+                fn on_tool_use(&self, _: String, _: ToolUseRequest) {}
+                fn on_tool_result(&self, a: String, b: String, c: String) {
+                    self.0.on_tool_result(a, b, c);
+                }
+                fn on_complete(&self, _: SubagentResult) {}
+                fn on_error(&self, _: String, _: String) {}
+            }
+            Wrapper(callback.clone())
+        }));
+
+        let hook = CallbackProxyHook::new("agent-789".to_string(), boxed);
+
+        let event = HookEvent::PostToolUse {
+            tool_name: "bash".to_string(),
+            input: serde_json::json!({"command": "ls"}),
+            result: mux::tool::ToolResult {
+                content: "file1.txt\nfile2.txt".to_string(),
+                is_error: false,
+                metadata: HashMap::new(),
+            },
+        };
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let result = rt.block_on(hook.on_event(&event)).unwrap();
+
+        assert!(matches!(result, HookAction::Continue));
+        assert!(callback.tool_result_called.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn test_callback_proxy_hook_on_event_other_events() {
+        use crate::callback::SubagentCallback;
+        use mux::hook::{Hook, HookAction, HookEvent};
+
+        struct DummyCallback;
+        impl SubagentCallback for DummyCallback {
+            fn on_text_delta(&self, _: String, _: String) {}
+            fn on_tool_use(&self, _: String, _: ToolUseRequest) {}
+            fn on_tool_result(&self, _: String, _: String, _: String) {}
+            fn on_complete(&self, _: SubagentResult) {}
+            fn on_error(&self, _: String, _: String) {}
+        }
+
+        let callback: Arc<Box<dyn SubagentCallback>> = Arc::new(Box::new(DummyCallback));
+        let hook = CallbackProxyHook::new("agent-abc".to_string(), callback);
+
+        // Other events should just return Continue without side effects
+        let iteration = HookEvent::Iteration {
+            agent_id: "agent-abc".to_string(),
+            iteration: 5,
+        };
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let result = rt.block_on(hook.on_event(&iteration)).unwrap();
+
+        assert!(matches!(result, HookAction::Continue));
+    }
+}
