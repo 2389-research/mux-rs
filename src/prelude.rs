@@ -10,7 +10,7 @@ pub use crate::llm::{
     StopReason, StreamEvent, ToolDefinition, Usage,
 };
 pub use crate::mcp::{
-    McpClient, McpContentBlock, McpLogLevel, McpPromptGetResult, McpPromptInfo,
+    HttpTransport, McpClient, McpContentBlock, McpLogLevel, McpPromptGetResult, McpPromptInfo,
     McpPromptsListResult, McpProxyTool, McpResourceContent, McpResourceInfo,
     McpResourcesListResult, McpRoot, McpSamplingParams, McpSamplingResult, McpServerCapabilities,
     McpServerConfig, McpToolInfo, McpToolResult, McpTransport, SseTransport, StdioTransport,

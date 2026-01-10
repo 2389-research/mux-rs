@@ -8,7 +8,7 @@ mod types;
 
 pub use client::McpClient;
 pub use proxy::McpProxyTool;
-pub use transport::{SseTransport, StdioTransport, Transport};
+pub use transport::{HttpTransport, SseTransport, StdioTransport, Transport};
 pub use types::*;
 
 #[cfg(test)]
