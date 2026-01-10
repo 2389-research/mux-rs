@@ -1,6 +1,14 @@
 // ABOUTME: MuxEngine - the main entry point for the FFI layer.
 // ABOUTME: Manages workspaces, conversations, and bridges to mux core.
 
+mod context_mgmt;
+mod helpers;
+mod mcp;
+mod messaging;
+mod persistence;
+mod subagent;
+mod workspace;
+
 use crate::bridge::FfiToolBridge;
 use crate::callback::{
     ChatCallback, ChatResult, CustomTool, HookHandler, LlmProvider, SubagentCallback,
@@ -1039,14 +1047,23 @@ impl MuxEngine {
 
     /// Find the MCP client and tool name for a qualified tool name (server:tool).
     fn parse_tool_name(&self, qualified_name: &str) -> Option<(String, String)> {
-        let parts: Vec<&str> = qualified_name.splitn(2, ':').collect();
-        if parts.len() == 2 {
-            Some((parts[0].to_string(), parts[1].to_string()))
-        } else {
-            None
-        }
+        parse_qualified_tool_name(qualified_name)
     }
+}
 
+/// Parse a qualified tool name (server:tool) into its components.
+/// Returns None if the name doesn't contain a colon separator.
+pub(crate) fn parse_qualified_tool_name(qualified_name: &str) -> Option<(String, String)> {
+    let parts: Vec<&str> = qualified_name.splitn(2, ':').collect();
+    if parts.len() == 2 {
+        Some((parts[0].to_string(), parts[1].to_string()))
+    } else {
+        None
+    }
+}
+
+/// MCP client management methods
+impl MuxEngine {
     /// Execute a tool call using pre-captured MCP client references.
     /// This is immune to race conditions from workspace disconnection during message processing.
     async fn execute_tool_with_captured_client(
@@ -1117,23 +1134,12 @@ impl MuxEngine {
 
     /// Get the configured model for a conversation's workspace
     fn get_model_for_conversation(&self, conversation_id: &str) -> Option<String> {
-        // Find workspace for this conversation
-        let conversations = self.conversations.read();
-        let workspace_id = conversations
-            .iter()
-            .find_map(|(ws_id, convs)| {
-                if convs.iter().any(|c| c.id == conversation_id) {
-                    Some(ws_id.clone())
-                } else {
-                    None
-                }
-            })?;
-        drop(conversations);
-
-        // Get workspace's LLM config
+        let workspace_id = self.get_workspace_for_conversation(conversation_id)?;
         let workspaces = self.workspaces.read();
-        let workspace = workspaces.get(&workspace_id)?;
-        workspace.llm_config.as_ref().map(|cfg| cfg.model.clone())
+        workspaces
+            .get(&workspace_id)
+            .and_then(|ws| ws.llm_config.as_ref())
+            .map(|cfg| cfg.model.clone())
     }
 
     /// Get the workspace ID for a conversation.
@@ -1161,17 +1167,7 @@ impl MuxEngine {
         };
 
         // Get model config for threshold
-        let threshold = self.get_workspace_for_conversation(conversation_id)
-            .and_then(|ws_id| {
-                let workspaces = self.workspaces.read();
-                workspaces.get(&ws_id).and_then(|ws| {
-                    ws.llm_config.as_ref().and_then(|config| {
-                        let model_configs = self.model_context_configs.read();
-                        model_configs.get(&config.model).map(|c| c.warning_threshold)
-                    })
-                })
-            })
-            .unwrap_or(0.8);
+        let threshold = self.get_warning_threshold_for_conversation(conversation_id);
 
         if let Some(percent) = usage.usage_percent {
             if percent >= threshold * 100.0 {
@@ -1181,6 +1177,19 @@ impl MuxEngine {
         }
 
         false
+    }
+
+    /// Get warning threshold for a conversation's configured model.
+    fn get_warning_threshold_for_conversation(&self, conversation_id: &str) -> f32 {
+        let model = self.get_model_for_conversation(conversation_id);
+        model
+            .and_then(|m| {
+                self.model_context_configs
+                    .read()
+                    .get(&m)
+                    .map(|c| c.warning_threshold)
+            })
+            .unwrap_or(0.8)
     }
 
     /// Truncate oldest messages to fit within token limit.
@@ -2236,5 +2245,44 @@ impl MuxEngine {
                 serde_json::to_string(subagent.transcript()).unwrap_or_default(),
             ),
         })
+    }
+}
+
+/// Test helper methods - only available in test builds
+#[cfg(test)]
+impl MuxEngine {
+    /// Inject a message into conversation history for testing.
+    pub(crate) fn inject_test_message(&self, conversation_id: &str, role: Role, text: &str) {
+        let mut history = self.message_history.write();
+        let messages = history.entry(conversation_id.to_string()).or_default();
+        messages.push(StoredMessage {
+            role,
+            content: vec![ContentBlock::text(text)],
+        });
+    }
+
+    /// Get message count for a conversation (for test assertions).
+    pub(crate) fn get_message_count(&self, conversation_id: &str) -> usize {
+        self.message_history
+            .read()
+            .get(conversation_id)
+            .map(|m| m.len())
+            .unwrap_or(0)
+    }
+
+    /// Set LLM config for a workspace (for testing context management).
+    pub(crate) fn set_workspace_llm_config(
+        &self,
+        workspace_id: &str,
+        model: &str,
+    ) {
+        let mut workspaces = self.workspaces.write();
+        if let Some(ws) = workspaces.get_mut(workspace_id) {
+            ws.llm_config = Some(crate::types::LlmConfig {
+                provider: crate::types::Provider::Anthropic,
+                model: model.to_string(),
+                api_key_ref: None,
+            });
+        }
     }
 }

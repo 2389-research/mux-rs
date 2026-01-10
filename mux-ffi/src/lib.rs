@@ -259,4 +259,118 @@ mod tests {
         // Cleanup
         engine.delete_workspace(ws.id).unwrap();
     }
+
+    #[test]
+    fn test_parse_qualified_tool_name() {
+        use crate::engine::parse_qualified_tool_name;
+
+        // Valid qualified names
+        let result = parse_qualified_tool_name("server:tool");
+        assert_eq!(result, Some(("server".to_string(), "tool".to_string())));
+
+        // Tool name with colons (splitn(2) keeps rest together)
+        let result = parse_qualified_tool_name("mcp:read:file");
+        assert_eq!(result, Some(("mcp".to_string(), "read:file".to_string())));
+
+        // Empty server name
+        let result = parse_qualified_tool_name(":tool");
+        assert_eq!(result, Some(("".to_string(), "tool".to_string())));
+
+        // No colon - returns None (builtin tool)
+        let result = parse_qualified_tool_name("read_file");
+        assert_eq!(result, None);
+
+        // Empty string
+        let result = parse_qualified_tool_name("");
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_context_usage_with_messages() {
+        use mux::prelude::Role;
+
+        let engine = MuxEngine::new("/tmp/mux-test-ctx-msg".to_string()).unwrap();
+        let ws = engine.create_workspace("Test".to_string(), None).unwrap();
+        let conv = engine.create_conversation(ws.id.clone(), "Test Conv".to_string()).unwrap();
+
+        // Inject some messages
+        engine.inject_test_message(&conv.id, Role::User, "Hello, how are you?");
+        engine.inject_test_message(&conv.id, Role::Assistant, "I'm doing well, thanks for asking!");
+
+        // Check usage reflects messages
+        let usage = engine.get_context_usage(conv.id.clone()).unwrap();
+        assert_eq!(usage.message_count, 2);
+        assert!(usage.estimated_tokens > 0);
+
+        // Cleanup
+        engine.delete_workspace(ws.id).unwrap();
+    }
+
+    #[test]
+    fn test_truncate_oldest_via_compact() {
+        use mux::prelude::Role;
+
+        let engine = MuxEngine::new("/tmp/mux-test-truncate".to_string()).unwrap();
+        let ws = engine.create_workspace("Truncate Test".to_string(), None).unwrap();
+
+        // Set workspace LLM config so model is known
+        engine.set_workspace_llm_config(&ws.id, "truncate-test-model");
+
+        // Configure very small context limit
+        engine.set_model_context_config(ModelContextConfig {
+            model: "truncate-test-model".to_string(),
+            context_limit: 50, // Very small - forces truncation
+            compaction_mode: CompactionMode::TruncateOldest,
+            warning_threshold: 0.5,
+        });
+
+        let conv = engine.create_conversation(ws.id.clone(), "Test".to_string()).unwrap();
+
+        // Add many messages to exceed limit
+        for i in 0..10 {
+            engine.inject_test_message(
+                &conv.id,
+                Role::User,
+                &format!("This is message number {} with some extra text to use tokens", i),
+            );
+        }
+
+        let before_count = engine.get_message_count(&conv.id);
+        assert_eq!(before_count, 10);
+
+        // Compact should truncate oldest
+        let usage = engine.compact_context(conv.id.clone()).unwrap();
+
+        let after_count = engine.get_message_count(&conv.id);
+        assert!(after_count < before_count, "Messages should be truncated");
+        assert!(usage.estimated_tokens <= 40, "Should be under effective limit (50 * 0.8)");
+
+        // Cleanup
+        engine.delete_workspace(ws.id).unwrap();
+    }
+
+    #[test]
+    fn test_get_workspace_for_conversation() {
+        let engine = MuxEngine::new("/tmp/mux-test-ws-conv".to_string()).unwrap();
+
+        let ws1 = engine.create_workspace("Workspace 1".to_string(), None).unwrap();
+        let ws2 = engine.create_workspace("Workspace 2".to_string(), None).unwrap();
+
+        let conv1 = engine.create_conversation(ws1.id.clone(), "Conv 1".to_string()).unwrap();
+        let conv2 = engine.create_conversation(ws2.id.clone(), "Conv 2".to_string()).unwrap();
+
+        // Verify correct workspace mapping
+        let usage1 = engine.get_context_usage(conv1.id.clone()).unwrap();
+        let usage2 = engine.get_context_usage(conv2.id.clone()).unwrap();
+        assert_eq!(usage1.message_count, 0);
+        assert_eq!(usage2.message_count, 0);
+
+        // Nonexistent conversation returns error
+        let result = engine.get_context_usage("nonexistent".to_string());
+        assert!(result.is_err());
+
+        // Cleanup
+        engine.delete_workspace(ws1.id).unwrap();
+        engine.delete_workspace(ws2.id).unwrap();
+    }
 }
