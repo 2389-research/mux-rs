@@ -578,3 +578,311 @@ impl MuxEngine {
         task_tool.execute(params).await.map_err(|e| e.to_string())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::callback::{ChatCallback, SubagentEventHandler};
+    use crate::context::ContextUsage;
+    use crate::types::AgentConfig;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    fn create_test_engine() -> Arc<MuxEngine> {
+        MuxEngine::new("/tmp/mux-test-messaging".to_string()).unwrap()
+    }
+
+    // Mock callback that tracks calls
+    struct TrackingCallback {
+        text_received: std::sync::Mutex<String>,
+        error_received: std::sync::Mutex<Option<String>>,
+        complete_called: AtomicBool,
+    }
+
+    impl TrackingCallback {
+        fn new() -> Self {
+            Self {
+                text_received: std::sync::Mutex::new(String::new()),
+                error_received: std::sync::Mutex::new(None),
+                complete_called: AtomicBool::new(false),
+            }
+        }
+    }
+
+    impl ChatCallback for TrackingCallback {
+        fn on_text_delta(&self, text: String) {
+            self.text_received.lock().unwrap().push_str(&text);
+        }
+
+        fn on_tool_use(&self, _request: ToolUseRequest) {}
+
+        fn on_tool_result(&self, _tool_use_id: String, _result: String) {}
+
+        fn on_complete(&self, _result: ChatResult) {
+            self.complete_called.store(true, Ordering::SeqCst);
+        }
+
+        fn on_error(&self, error: String) {
+            *self.error_received.lock().unwrap() = Some(error);
+        }
+
+        fn on_context_warning(&self, _usage: ContextUsage) {}
+    }
+
+    #[test]
+    fn test_do_send_message_no_api_key_echo_fallback() {
+        let engine = create_test_engine();
+        let ws = engine
+            .create_workspace("Msg Test".to_string(), None)
+            .unwrap();
+        let conv = engine
+            .create_conversation(ws.id.clone(), "Test Conv".to_string())
+            .unwrap();
+
+        // Don't set any API key - should trigger echo fallback
+        let callback = Arc::new(TrackingCallback::new());
+        let _cb: Arc<Box<dyn ChatCallback>> = Arc::new(Box::new(TrackingCallback::new()));
+
+        // Need to run async code
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let result = rt.block_on(engine.do_send_message(
+            conv.id.clone(),
+            "Hello world".to_string(),
+            Arc::new(Box::new({
+                struct Wrapper(Arc<TrackingCallback>);
+                impl ChatCallback for Wrapper {
+                    fn on_text_delta(&self, text: String) {
+                        self.0.on_text_delta(text);
+                    }
+                    fn on_tool_use(&self, r: ToolUseRequest) {
+                        self.0.on_tool_use(r);
+                    }
+                    fn on_tool_result(&self, id: String, result: String) {
+                        self.0.on_tool_result(id, result);
+                    }
+                    fn on_complete(&self, r: ChatResult) {
+                        self.0.on_complete(r);
+                    }
+                    fn on_error(&self, e: String) {
+                        self.0.on_error(e);
+                    }
+                    fn on_context_warning(&self, u: ContextUsage) {
+                        self.0.on_context_warning(u);
+                    }
+                }
+                Wrapper(callback.clone())
+            })),
+        ));
+
+        assert!(result.is_ok());
+        let chat_result = result.unwrap();
+
+        // Should return echo message
+        assert!(chat_result.final_text.contains("Echo: Hello world"));
+        assert!(chat_result.final_text.contains("No API key set"));
+        assert_eq!(chat_result.tool_use_count, 0);
+        assert_eq!(chat_result.input_tokens, 0);
+        assert_eq!(chat_result.output_tokens, 0);
+
+        // Callback should have received the text
+        let text = callback.text_received.lock().unwrap();
+        assert!(text.contains("Echo: Hello world"));
+
+        engine.delete_workspace(ws.id).unwrap();
+    }
+
+    #[test]
+    fn test_do_send_message_custom_provider_not_registered() {
+        let engine = create_test_engine();
+        let ws = engine
+            .create_workspace("Custom Test".to_string(), None)
+            .unwrap();
+        let conv = engine
+            .create_conversation(ws.id.clone(), "Test Conv".to_string())
+            .unwrap();
+
+        // Set custom provider but don't register it
+        engine.set_default_provider(Provider::Custom {
+            name: "my-custom-llm".to_string(),
+        });
+
+        let callback = Arc::new(TrackingCallback::new());
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let result = rt.block_on(engine.do_send_message(
+            conv.id.clone(),
+            "Hello".to_string(),
+            Arc::new(Box::new({
+                struct Wrapper(Arc<TrackingCallback>);
+                impl ChatCallback for Wrapper {
+                    fn on_text_delta(&self, text: String) {
+                        self.0.on_text_delta(text);
+                    }
+                    fn on_tool_use(&self, r: ToolUseRequest) {
+                        self.0.on_tool_use(r);
+                    }
+                    fn on_tool_result(&self, id: String, result: String) {
+                        self.0.on_tool_result(id, result);
+                    }
+                    fn on_complete(&self, r: ChatResult) {
+                        self.0.on_complete(r);
+                    }
+                    fn on_error(&self, e: String) {
+                        self.0.on_error(e);
+                    }
+                    fn on_context_warning(&self, u: ContextUsage) {
+                        self.0.on_context_warning(u);
+                    }
+                }
+                Wrapper(callback.clone())
+            })),
+        ));
+
+        assert!(result.is_err());
+        let error = result.unwrap_err();
+        assert!(error.contains("my-custom-llm"));
+        assert!(error.contains("not registered"));
+
+        // Callback should have received the error
+        let error_received = callback.error_received.lock().unwrap();
+        assert!(error_received.is_some());
+        assert!(error_received.as_ref().unwrap().contains("my-custom-llm"));
+
+        engine.delete_workspace(ws.id).unwrap();
+    }
+
+    #[test]
+    fn test_execute_task_tool_no_handler() {
+        let engine = create_test_engine();
+
+        // Don't set subagent event handler
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let result = rt.block_on(engine.execute_task_tool(serde_json::json!({
+            "agent_type": "test",
+            "task": "do something",
+            "description": "test task"
+        })));
+
+        assert!(result.is_ok());
+        let tool_result = result.unwrap();
+        assert!(tool_result.is_error);
+        assert!(tool_result.content.contains("no subagent event handler"));
+    }
+
+    #[test]
+    fn test_execute_task_tool_custom_provider_not_registered() {
+        let engine = create_test_engine();
+
+        // Set up handler but use unregistered custom provider
+        struct DummyHandler;
+        impl SubagentEventHandler for DummyHandler {
+            fn on_agent_started(&self, _: String, _: String, _: String, _: String) {}
+            fn on_tool_use(&self, _: String, _: String, _: String) {}
+            fn on_tool_result(&self, _: String, _: String, _: String, _: bool) {}
+            fn on_iteration(&self, _: String, _: u32) {}
+            fn on_agent_completed(&self, _: String, _: String, _: u32, _: u32, _: bool) {}
+            fn on_agent_error(&self, _: String, _: String) {}
+        }
+
+        engine.set_subagent_event_handler(Box::new(DummyHandler));
+        engine.set_default_provider(Provider::Custom {
+            name: "unregistered-provider".to_string(),
+        });
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let result = rt.block_on(engine.execute_task_tool(serde_json::json!({
+            "agent_type": "test",
+            "task": "do something",
+            "description": "test task"
+        })));
+
+        assert!(result.is_err());
+        let error = result.unwrap_err();
+        assert!(error.contains("unregistered-provider"));
+        assert!(error.contains("not registered"));
+
+        engine.clear_subagent_event_handler();
+    }
+
+    #[test]
+    fn test_execute_task_tool_no_model_for_agent() {
+        let engine = create_test_engine();
+
+        struct DummyHandler;
+        impl SubagentEventHandler for DummyHandler {
+            fn on_agent_started(&self, _: String, _: String, _: String, _: String) {}
+            fn on_tool_use(&self, _: String, _: String, _: String) {}
+            fn on_tool_result(&self, _: String, _: String, _: String, _: bool) {}
+            fn on_iteration(&self, _: String, _: u32) {}
+            fn on_agent_completed(&self, _: String, _: String, _: u32, _: u32, _: bool) {}
+            fn on_agent_error(&self, _: String, _: String) {}
+        }
+
+        engine.set_subagent_event_handler(Box::new(DummyHandler));
+
+        // Register an agent WITHOUT a model, and don't set provider default model
+        engine
+            .register_agent(AgentConfig::new(
+                "no-model-agent".to_string(),
+                "You are a test agent.".to_string(),
+            ))
+            .unwrap();
+
+        // Set Anthropic provider with API key but NO default model
+        engine.set_api_key(Provider::Anthropic, "sk-test".to_string());
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let result = rt.block_on(engine.execute_task_tool(serde_json::json!({
+            "agent_type": "no-model-agent",
+            "task": "do something",
+            "description": "test task"
+        })));
+
+        assert!(result.is_err());
+        let error = result.unwrap_err();
+        assert!(error.contains("No model configured"));
+        assert!(error.contains("no-model-agent"));
+
+        engine.clear_subagent_event_handler();
+    }
+
+    #[test]
+    fn test_execute_task_tool_provider_not_configured() {
+        let engine = create_test_engine();
+
+        struct DummyHandler;
+        impl SubagentEventHandler for DummyHandler {
+            fn on_agent_started(&self, _: String, _: String, _: String, _: String) {}
+            fn on_tool_use(&self, _: String, _: String, _: String) {}
+            fn on_tool_result(&self, _: String, _: String, _: String, _: bool) {}
+            fn on_iteration(&self, _: String, _: u32) {}
+            fn on_agent_completed(&self, _: String, _: String, _: u32, _: u32, _: bool) {}
+            fn on_agent_error(&self, _: String, _: String) {}
+        }
+
+        engine.set_subagent_event_handler(Box::new(DummyHandler));
+
+        // Register an agent with a model
+        let mut config = AgentConfig::new(
+            "configured-agent".to_string(),
+            "You are a test agent.".to_string(),
+        );
+        config.model = Some("claude-3-opus".to_string());
+        engine.register_agent(config).unwrap();
+
+        // Set Anthropic as provider but DON'T configure API key
+        engine.set_default_provider(Provider::Anthropic);
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let result = rt.block_on(engine.execute_task_tool(serde_json::json!({
+            "agent_type": "configured-agent",
+            "task": "do something",
+            "description": "test task"
+        })));
+
+        assert!(result.is_err());
+        let error = result.unwrap_err();
+        assert!(error.contains("Provider not configured"));
+
+        engine.clear_subagent_event_handler();
+    }
+}
