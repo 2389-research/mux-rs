@@ -20,7 +20,7 @@ jobs:
           targets: aarch64-apple-ios,aarch64-apple-ios-sim
 
       - name: Install uniffi-bindgen
-        run: cargo install uniffi
+        run: cargo install uniffi --features=cli
 
       - name: Build iOS device
         run: cargo build --release --target aarch64-apple-ios -p mux-ffi
