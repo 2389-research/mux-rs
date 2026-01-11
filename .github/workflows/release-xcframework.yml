@@ -30,7 +30,7 @@ jobs:
 
       - name: Generate Swift bindings
         run: |
-          uniffi-bindgen generate \
+          $HOME/.cargo/bin/uniffi-bindgen generate \
             --library target/aarch64-apple-ios/release/libmux_ffi.a \
             --language swift \
             --out-dir mux-ffi/bindings
