@@ -1,0 +1,66 @@
+# ABOUTME: Builds MuxFFI xcframework and creates GitHub Release
+# ABOUTME: Triggered on version tags (v*), outputs xcframework.zip with checksum
+
+name: Release XCFramework
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build-xcframework:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios,aarch64-apple-ios-sim
+
+      - name: Install uniffi-bindgen
+        run: cargo install uniffi_bindgen
+
+      - name: Build iOS device
+        run: cargo build --release --target aarch64-apple-ios -p mux-ffi
+
+      - name: Build iOS simulator
+        run: cargo build --release --target aarch64-apple-ios-sim -p mux-ffi
+
+      - name: Generate Swift bindings
+        run: |
+          uniffi-bindgen generate \
+            --library target/aarch64-apple-ios/release/libmux_ffi.a \
+            --language swift \
+            --out-dir mux-ffi/bindings
+          mv mux-ffi/bindings/MuxFFIFFI.modulemap mux-ffi/bindings/module.modulemap
+
+      - name: Create XCFramework
+        run: |
+          mkdir -p dist
+          xcodebuild -create-xcframework \
+            -library target/aarch64-apple-ios/release/libmux_ffi.a \
+            -headers mux-ffi/bindings \
+            -library target/aarch64-apple-ios-sim/release/libmux_ffi.a \
+            -headers mux-ffi/bindings \
+            -output dist/MuxFFI.xcframework
+
+      - name: Copy Swift bindings
+        run: cp mux-ffi/bindings/*.swift dist/
+
+      - name: Create zip
+        run: |
+          cd dist
+          zip -r MuxFFI.xcframework.zip MuxFFI.xcframework MuxFFI.swift
+          shasum -a 256 MuxFFI.xcframework.zip > MuxFFI.xcframework.zip.sha256
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            dist/MuxFFI.xcframework.zip
+            dist/MuxFFI.xcframework.zip.sha256
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
