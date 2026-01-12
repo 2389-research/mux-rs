@@ -169,9 +169,8 @@ impl Coordinator {
     ///
     /// * `agent_id` - The ID of the agent releasing the lock.
     /// * `resource_id` - The ID of the resource to unlock.
-    pub fn release(&self, agent_id: &str, resource_id: &str) -> Result<(), LockError> {
-        // Use blocking lock since this is a sync function
-        let mut locks = self.locks.blocking_lock();
+    pub async fn release(&self, agent_id: &str, resource_id: &str) -> Result<(), LockError> {
+        let mut locks = self.locks.lock().await;
 
         if let Some(lock) = locks.get(resource_id) {
             if lock.owner_id != agent_id {
@@ -195,8 +194,8 @@ impl Coordinator {
     /// # Arguments
     ///
     /// * `agent_id` - The ID of the agent whose locks should be released.
-    pub fn release_all(&self, agent_id: &str) {
-        let mut locks = self.locks.blocking_lock();
+    pub async fn release_all(&self, agent_id: &str) {
+        let mut locks = self.locks.lock().await;
 
         locks.retain(|_, lock| lock.owner_id != agent_id);
     }

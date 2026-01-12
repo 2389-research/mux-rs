@@ -47,7 +47,7 @@ async fn test_release_succeeds_when_owner() {
     let coordinator = Coordinator::new();
 
     coordinator.acquire("agent-1", "resource-a").await.unwrap();
-    let result = coordinator.release("agent-1", "resource-a");
+    let result = coordinator.release("agent-1", "resource-a").await;
     assert!(result.is_ok());
 
     // Resource should now be available
@@ -62,7 +62,7 @@ async fn test_release_fails_when_not_owner() {
     coordinator.acquire("agent-1", "resource-a").await.unwrap();
 
     // Agent 2 tries to release
-    let result = coordinator.release("agent-2", "resource-a");
+    let result = coordinator.release("agent-2", "resource-a").await;
     assert!(result.is_err());
 
     match result.unwrap_err() {
@@ -80,7 +80,7 @@ async fn test_release_idempotent_when_not_locked() {
     let coordinator = Coordinator::new();
 
     // Release a resource that was never locked should succeed
-    let result = coordinator.release("agent-1", "resource-a");
+    let result = coordinator.release("agent-1", "resource-a").await;
     assert!(result.is_ok());
 }
 
@@ -97,7 +97,7 @@ async fn test_release_all_releases_all_locks_for_agent() {
     coordinator.acquire("agent-2", "resource-d").await.unwrap();
 
     // Release all for agent 1
-    coordinator.release_all("agent-1");
+    coordinator.release_all("agent-1").await;
 
     // Agent 2 should be able to acquire agent 1's former resources
     assert!(coordinator.acquire("agent-2", "resource-a").await.is_ok());
@@ -113,8 +113,8 @@ async fn test_release_all_idempotent_when_no_locks() {
     let coordinator = Coordinator::new();
 
     // Should not panic or error
-    coordinator.release_all("agent-1");
-    coordinator.release_all("agent-1"); // Call twice
+    coordinator.release_all("agent-1").await;
+    coordinator.release_all("agent-1").await; // Call twice
 }
 
 #[tokio::test]
@@ -142,8 +142,8 @@ async fn test_multiple_resources_independent() {
     coordinator.acquire("agent-2", "resource-b").await.unwrap();
 
     // Both should be able to release their own
-    assert!(coordinator.release("agent-1", "resource-a").is_ok());
-    assert!(coordinator.release("agent-2", "resource-b").is_ok());
+    assert!(coordinator.release("agent-1", "resource-a").await.is_ok());
+    assert!(coordinator.release("agent-2", "resource-b").await.is_ok());
 }
 
 #[tokio::test]
