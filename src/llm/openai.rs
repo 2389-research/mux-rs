@@ -16,8 +16,12 @@ const OPENAI_DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
 pub struct OpenAIRequest {
     pub model: String,
     pub messages: Vec<OpenAIMessage>,
+    /// Used by older models (gpt-4o, gpt-4, gpt-3.5-turbo, etc.)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u32>,
+    /// Used by newer reasoning models (o1, o3, gpt-5, etc.)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_completion_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f64>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -329,6 +333,14 @@ fn convert_messages(messages: &[Message]) -> Vec<OpenAIMessage> {
     result
 }
 
+/// Check if a model requires max_completion_tokens instead of max_tokens.
+fn uses_max_completion_tokens(model: &str) -> bool {
+    let model_lower = model.to_lowercase();
+    model_lower.starts_with("o1")
+        || model_lower.starts_with("o3")
+        || model_lower.starts_with("gpt-5")
+}
+
 impl From<&Request> for OpenAIRequest {
     fn from(req: &Request) -> Self {
         let mut messages = Vec::new();
@@ -346,10 +358,18 @@ impl From<&Request> for OpenAIRequest {
         // Convert conversation messages
         messages.extend(convert_messages(&req.messages));
 
+        // Newer reasoning models use max_completion_tokens instead of max_tokens
+        let (max_tokens, max_completion_tokens) = if uses_max_completion_tokens(&req.model) {
+            (None, req.max_tokens)
+        } else {
+            (req.max_tokens, None)
+        };
+
         OpenAIRequest {
             model: req.model.clone(),
             messages,
-            max_tokens: req.max_tokens,
+            max_tokens,
+            max_completion_tokens,
             temperature: req.temperature,
             tools: req.tools.iter().map(OpenAITool::from).collect(),
             stream: None,
