@@ -3,12 +3,14 @@
 
 mod definition;
 mod filter;
+mod presets;
 mod runner;
 mod task;
 mod transcript;
 
 pub use definition::{AgentDefinition, AgentRegistry};
 pub use filter::FilteredRegistry;
+pub use presets::{all_presets, get_preset, Preset, EXPLORER, PLANNER, RESEARCHER, REVIEWER, WRITER};
 pub use runner::{SubAgent, SubAgentResult};
 pub use task::TaskTool;
 pub use transcript::{MemoryTranscriptStore, TranscriptStore};
