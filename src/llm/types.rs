@@ -106,11 +106,27 @@ pub struct ToolDefinition {
     pub input_schema: serde_json::Value,
 }
 
-/// Token usage statistics.
+/// Token usage statistics from a single API response.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Usage {
     pub input_tokens: u32,
     pub output_tokens: u32,
+    /// Tokens read from cache (Anthropic prompt caching).
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub cache_read_tokens: u32,
+    /// Tokens written to cache (Anthropic prompt caching).
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub cache_write_tokens: u32,
+}
+
+/// Helper for skip_serializing_if on u32.
+fn is_zero_u32(val: &u32) -> bool {
+    *val == 0
+}
+
+/// Helper for skip_serializing_if on u64.
+fn is_zero_u64(val: &u64) -> bool {
+    *val == 0
 }
 
 /// Request to create a message.
@@ -212,5 +228,143 @@ impl Response {
             })
             .collect::<Vec<_>>()
             .join("")
+    }
+}
+
+use std::fmt;
+use std::sync::{Arc, Mutex};
+
+/// Thread-safe token usage accumulator for tracking usage across multiple API calls.
+///
+/// This type wraps an inner struct with `Arc<Mutex<>>` to allow safe sharing
+/// across async tasks.
+#[derive(Clone)]
+pub struct TokenUsage {
+    inner: Arc<Mutex<TokenUsageInner>>,
+}
+
+/// Internal storage for token usage data.
+#[derive(Debug, Default)]
+struct TokenUsageInner {
+    input_tokens: u64,
+    output_tokens: u64,
+    cache_read_tokens: u64,
+    cache_write_tokens: u64,
+    request_count: u64,
+}
+
+impl TokenUsage {
+    /// Create a new token usage accumulator.
+    pub fn new() -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(TokenUsageInner::default())),
+        }
+    }
+
+    /// Add usage from an API response.
+    ///
+    /// Increments the request count and adds all token counts including cache tokens.
+    pub fn add(&self, usage: &Usage) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.input_tokens += usage.input_tokens as u64;
+        inner.output_tokens += usage.output_tokens as u64;
+        inner.cache_read_tokens += usage.cache_read_tokens as u64;
+        inner.cache_write_tokens += usage.cache_write_tokens as u64;
+        inner.request_count += 1;
+    }
+
+    /// Add usage with explicit cache token counts.
+    ///
+    /// Use this when cache tokens are reported separately from the Usage struct.
+    pub fn add_with_cache(&self, usage: &Usage, cache_read: u32, cache_write: u32) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.input_tokens += usage.input_tokens as u64;
+        inner.output_tokens += usage.output_tokens as u64;
+        inner.cache_read_tokens += cache_read as u64;
+        inner.cache_write_tokens += cache_write as u64;
+        inner.request_count += 1;
+    }
+
+    /// Get total tokens used (input + output).
+    pub fn total(&self) -> u64 {
+        let inner = self.inner.lock().unwrap();
+        inner.input_tokens + inner.output_tokens
+    }
+
+    /// Get a snapshot of current usage statistics.
+    ///
+    /// Returns a copy that can be safely used without holding the lock.
+    pub fn snapshot(&self) -> TokenUsageSnapshot {
+        let inner = self.inner.lock().unwrap();
+        TokenUsageSnapshot {
+            input_tokens: inner.input_tokens,
+            output_tokens: inner.output_tokens,
+            cache_read_tokens: inner.cache_read_tokens,
+            cache_write_tokens: inner.cache_write_tokens,
+            request_count: inner.request_count,
+        }
+    }
+
+    /// Reset all usage statistics to zero.
+    pub fn reset(&self) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.input_tokens = 0;
+        inner.output_tokens = 0;
+        inner.cache_read_tokens = 0;
+        inner.cache_write_tokens = 0;
+        inner.request_count = 0;
+    }
+}
+
+impl Default for TokenUsage {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl fmt::Debug for TokenUsage {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let inner = self.inner.lock().unwrap();
+        f.debug_struct("TokenUsage")
+            .field("input_tokens", &inner.input_tokens)
+            .field("output_tokens", &inner.output_tokens)
+            .field("cache_read_tokens", &inner.cache_read_tokens)
+            .field("cache_write_tokens", &inner.cache_write_tokens)
+            .field("request_count", &inner.request_count)
+            .finish()
+    }
+}
+
+/// A snapshot of token usage statistics.
+///
+/// This is a plain data struct that can be safely copied and serialized.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TokenUsageSnapshot {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub cache_read_tokens: u64,
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub cache_write_tokens: u64,
+    pub request_count: u64,
+}
+
+impl TokenUsageSnapshot {
+    /// Get total tokens (input + output).
+    pub fn total(&self) -> u64 {
+        self.input_tokens + self.output_tokens
+    }
+}
+
+impl fmt::Display for TokenUsageSnapshot {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{} input + {} output = {} total ({} requests)",
+            self.input_tokens,
+            self.output_tokens,
+            self.total(),
+            self.request_count
+        )
     }
 }

@@ -414,6 +414,7 @@ impl From<OpenAIResponse> for Response {
             usage: Usage {
                 input_tokens: usage.prompt_tokens,
                 output_tokens: usage.completion_tokens,
+                ..Default::default()
             },
         }
     }

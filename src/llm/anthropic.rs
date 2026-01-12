@@ -78,6 +78,12 @@ pub struct AnthropicResponse {
 pub struct AnthropicUsage {
     pub input_tokens: u32,
     pub output_tokens: u32,
+    /// Tokens read from cache (prompt caching feature).
+    #[serde(default)]
+    pub cache_read_input_tokens: Option<u32>,
+    /// Tokens written to cache (prompt caching feature).
+    #[serde(default)]
+    pub cache_creation_input_tokens: Option<u32>,
 }
 
 /// Anthropic API error response.
@@ -265,6 +271,8 @@ impl From<AnthropicResponse> for Response {
             usage: Usage {
                 input_tokens: resp.usage.input_tokens,
                 output_tokens: resp.usage.output_tokens,
+                cache_read_tokens: resp.usage.cache_read_input_tokens.unwrap_or(0),
+                cache_write_tokens: resp.usage.cache_creation_input_tokens.unwrap_or(0),
             },
         }
     }
@@ -308,6 +316,7 @@ fn parse_sse_event(event_str: &str) -> Option<StreamEvent> {
             usage: Usage {
                 input_tokens: usage.input_tokens,
                 output_tokens: usage.output_tokens,
+                ..Default::default()
             },
         }),
         AnthropicStreamEvent::MessageStop => Some(StreamEvent::MessageStop),

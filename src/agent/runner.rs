@@ -202,6 +202,8 @@ impl SubAgent {
             // Aggregate usage
             self.usage.input_tokens += response.usage.input_tokens;
             self.usage.output_tokens += response.usage.output_tokens;
+            self.usage.cache_read_tokens += response.usage.cache_read_tokens;
+            self.usage.cache_write_tokens += response.usage.cache_write_tokens;
 
             // Check for tool use
             if response.has_tool_use() {
@@ -322,6 +324,8 @@ mod tests {
             usage: Usage {
                 input_tokens: 100,
                 output_tokens: 50,
+                cache_read_tokens: 20,
+                cache_write_tokens: 10,
             },
             iterations: 2,
         };
@@ -329,5 +333,7 @@ mod tests {
         assert_eq!(result.agent_id, "test-123");
         assert_eq!(result.tool_use_count, 3);
         assert_eq!(result.iterations, 2);
+        assert_eq!(result.usage.cache_read_tokens, 20);
+        assert_eq!(result.usage.cache_write_tokens, 10);
     }
 }

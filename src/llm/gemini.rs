@@ -362,6 +362,7 @@ fn convert_gemini_response(resp: GeminiResponse, model: String) -> Result<Respon
         usage: Usage {
             input_tokens: usage.prompt_token_count,
             output_tokens: usage.candidates_token_count,
+            ..Default::default()
         },
     })
 }
@@ -520,6 +521,7 @@ impl super::client::LlmClient for GeminiClient {
                                 let usage = gemini_resp.usage_metadata.as_ref().map(|u| Usage {
                                     input_tokens: u.prompt_token_count,
                                     output_tokens: u.candidates_token_count,
+                                    ..Default::default()
                                 }).unwrap_or_default();
 
                                 yield StreamEvent::MessageDelta {
