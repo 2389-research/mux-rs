@@ -420,7 +420,9 @@ impl From<OpenAIResponse> for Response {
     }
 }
 
-fn parse_sse_line(line: &str) -> Option<OpenAIStreamChunk> {
+/// Parse an SSE line into an OpenAI stream chunk.
+/// Used internally by OpenAI-compatible clients.
+pub fn parse_sse_line(line: &str) -> Option<OpenAIStreamChunk> {
     let data = line.strip_prefix("data: ")?;
     if data == "[DONE]" {
         return None;
