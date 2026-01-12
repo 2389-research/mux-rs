@@ -125,10 +125,10 @@ impl Coordinator {
         tokio::select! {
             biased;
             () = &mut cancel => {
-                return Err(LockError::Cancelled);
+                Err(LockError::Cancelled)
             }
             result = self.try_acquire(agent_id, resource_id) => {
-                return result;
+                result
             }
         }
     }
