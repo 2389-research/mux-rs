@@ -2,6 +2,7 @@
 // ABOUTME: Re-exports all public types from submodules.
 
 pub mod agent;
+pub mod coordinator;
 pub mod error;
 pub mod hook;
 pub mod llm;
