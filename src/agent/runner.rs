@@ -10,6 +10,7 @@ use super::filter::FilteredRegistry;
 use crate::error::LlmError;
 use crate::hook::{HookAction, HookEvent, HookRegistry};
 use crate::llm::{ContentBlock, LlmClient, Message, Request, Role, Usage};
+use crate::permission::{ApprovalContext, ApprovalHandler};
 use crate::tool::Registry;
 
 /// Result from running a subagent.
@@ -56,6 +57,9 @@ pub struct SubAgent {
 
     /// Optional hook registry for lifecycle events.
     hooks: Option<Arc<HookRegistry>>,
+
+    /// Optional approval handler for tools requiring user approval.
+    approval_handler: Option<Arc<dyn ApprovalHandler>>,
 }
 
 impl SubAgent {
@@ -78,6 +82,7 @@ impl SubAgent {
             tool_use_count: 0,
             usage: Usage::default(),
             hooks: None,
+            approval_handler: None,
         }
     }
 
@@ -110,12 +115,19 @@ impl SubAgent {
             tool_use_count: 0,
             usage: Usage::default(),
             hooks: None,
+            approval_handler: None,
         }
     }
 
     /// Set the hook registry for lifecycle events.
     pub fn with_hooks(mut self, hooks: Arc<HookRegistry>) -> Self {
         self.hooks = Some(hooks);
+        self
+    }
+
+    /// Set the approval handler for tools requiring user approval.
+    pub fn with_approval_handler(mut self, handler: Arc<dyn ApprovalHandler>) -> Self {
+        self.approval_handler = Some(handler);
         self
     }
 
@@ -293,16 +305,58 @@ impl SubAgent {
     }
 
     /// Execute a tool and return the result.
+    ///
+    /// If the tool requires approval and an approval handler is set,
+    /// this will request approval before executing. If denied, returns
+    /// an error result without executing the tool.
     async fn execute_tool(
         &self,
         name: &str,
         input: serde_json::Value,
     ) -> crate::tool::ToolResult {
         match self.tools.get(name).await {
-            Some(tool) => match tool.execute(input).await {
-                Ok(r) => r,
-                Err(e) => crate::tool::ToolResult::error(e.to_string()),
-            },
+            Some(tool) => {
+                // Check if tool requires approval
+                if tool.requires_approval(&input) {
+                    if let Some(handler) = &self.approval_handler {
+                        let context = ApprovalContext {
+                            tool_description: tool.description().to_string(),
+                            request_id: Uuid::new_v4().to_string(),
+                        };
+
+                        match handler.request_approval(name, &input, &context).await {
+                            Ok(true) => {
+                                // Approved - continue to execution
+                            }
+                            Ok(false) => {
+                                return crate::tool::ToolResult::error(format!(
+                                    "Tool '{}' execution denied by approval handler",
+                                    name
+                                ));
+                            }
+                            Err(e) => {
+                                return crate::tool::ToolResult::error(format!(
+                                    "Approval handler error for '{}': {}",
+                                    name, e
+                                ));
+                            }
+                        }
+                    }
+                    // No approval handler but tool requires approval - block by default
+                    else {
+                        return crate::tool::ToolResult::error(format!(
+                            "Tool '{}' requires approval but no approval handler is set",
+                            name
+                        ));
+                    }
+                }
+
+                // Execute the tool
+                match tool.execute(input).await {
+                    Ok(r) => r,
+                    Err(e) => crate::tool::ToolResult::error(e.to_string()),
+                }
+            }
             None => crate::tool::ToolResult::error(format!(
                 "Tool '{}' not found or not allowed",
                 name
