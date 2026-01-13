@@ -6,6 +6,7 @@ use crate::types::{Conversation, Workspace, WorkspaceSummary};
 use crate::MuxFfiError;
 
 /// Workspace and Conversation CRUD operations
+#[uniffi::export]
 impl MuxEngine {
     pub fn create_workspace(
         &self,

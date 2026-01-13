@@ -22,6 +22,7 @@ pub(super) struct McpClientHandle {
 }
 
 /// MCP server configuration methods
+#[uniffi::export]
 impl MuxEngine {
     pub fn add_mcp_server(
         &self,
