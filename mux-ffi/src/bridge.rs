@@ -36,6 +36,7 @@ impl Hook for FfiHookBridge {
             }
             HookEvent::PostToolUse {
                 tool_name,
+                tool_use_id: _,
                 input,
                 result,
             } => {
@@ -61,12 +62,13 @@ impl Hook for FfiHookBridge {
                 agent_id: agent_id.clone(),
                 iteration: *iteration as u32,
             },
-            // Session and subagent events - pass through without FFI callback
+            // Session, subagent, and response events - pass through without FFI callback
             HookEvent::SessionStart { .. }
             | HookEvent::SessionEnd { .. }
             | HookEvent::Stop { .. }
             | HookEvent::SubagentStart { .. }
-            | HookEvent::SubagentStop { .. } => {
+            | HookEvent::SubagentStop { .. }
+            | HookEvent::ResponseReceived { .. } => {
                 return Ok(HookAction::Continue);
             }
         };

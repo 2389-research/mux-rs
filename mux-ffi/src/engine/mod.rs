@@ -7,6 +7,7 @@ mod mcp;
 mod messaging;
 mod persistence;
 mod subagent;
+mod tool_wrappers;
 mod workspace;
 
 use crate::bridge::FfiToolBridge;

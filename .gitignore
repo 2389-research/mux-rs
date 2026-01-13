@@ -2,3 +2,4 @@
 .env
 .scratch/
 mux-ffi/bindings/
+mux-ffi/bindings-macos/

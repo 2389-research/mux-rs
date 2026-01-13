@@ -116,13 +116,14 @@ impl mux::hook::Hook for CallbackProxyHook {
             }
             mux::hook::HookEvent::PostToolUse {
                 tool_name: _,
+                tool_use_id,
                 input: _,
                 result,
             } => {
                 // Notify callback of tool result
                 self.callback.on_tool_result(
                     self.agent_id.clone(),
-                    "".to_string(), // tool_id not available from hook
+                    tool_use_id.clone(),
                     result.content.clone(),
                 );
             }
@@ -648,6 +649,7 @@ mod tests {
 
         let post_tool = HookEvent::PostToolUse {
             tool_name: "test".to_string(),
+            tool_use_id: "toolu_123".to_string(),
             input: serde_json::json!({}),
             result: mux::tool::ToolResult {
                 content: "result".to_string(),
@@ -755,6 +757,7 @@ mod tests {
 
         let event = HookEvent::PostToolUse {
             tool_name: "bash".to_string(),
+            tool_use_id: "toolu_456".to_string(),
             input: serde_json::json!({"command": "ls"}),
             result: mux::tool::ToolResult {
                 content: "file1.txt\nfile2.txt".to_string(),

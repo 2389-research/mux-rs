@@ -23,6 +23,7 @@ pub enum HookEvent {
     /// Fired after a tool execution completes.
     PostToolUse {
         tool_name: String,
+        tool_use_id: String,
         input: Value,
         result: ToolResult,
     },
@@ -86,6 +87,16 @@ pub enum HookEvent {
         name: String,
         /// Error message if the subagent ended with an error.
         error: Option<String>,
+    },
+
+    /// Fired after each LLM response is received.
+    /// Enables streaming text and tool use notifications to callbacks.
+    ResponseReceived {
+        agent_id: String,
+        /// Text content from the response (if any).
+        text: String,
+        /// Tool uses in this response (name, id, input JSON).
+        tool_uses: Vec<(String, String, Value)>,
     },
 }
 
@@ -191,6 +202,7 @@ impl HookRegistry {
                             HookEvent::Stop { .. } => "Stop",
                             HookEvent::SubagentStart { .. } => "SubagentStart",
                             HookEvent::SubagentStop { .. } => "SubagentStop",
+                            HookEvent::ResponseReceived { .. } => "ResponseReceived",
                         };
                         return Err(anyhow::anyhow!(
                             "HookAction::Transform is only valid for PreToolUse events, got {}",
@@ -454,6 +466,9 @@ mod tests {
                 HookEvent::Stop { session_id, .. } => format!("stop_event:{}", session_id),
                 HookEvent::SubagentStart { child_id, .. } => format!("subagent_start:{}", child_id),
                 HookEvent::SubagentStop { child_id, .. } => format!("subagent_stop:{}", child_id),
+                HookEvent::ResponseReceived { agent_id, .. } => {
+                    format!("response:{}", agent_id)
+                }
             };
             self.events.write().await.push(msg);
             Ok(HookAction::Continue)
@@ -595,6 +610,7 @@ mod tests {
         // Transform on PostToolUse should error
         let event = HookEvent::PostToolUse {
             tool_name: "test".into(),
+            tool_use_id: "toolu_123".into(),
             input: serde_json::json!({}),
             result: crate::tool::ToolResult::text("ok"),
         };

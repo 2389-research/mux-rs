@@ -70,7 +70,8 @@ impl Hook for SubagentEventProxyHook {
             | HookEvent::SessionEnd { .. }
             | HookEvent::Stop { .. }
             | HookEvent::SubagentStart { .. }
-            | HookEvent::SubagentStop { .. } => {
+            | HookEvent::SubagentStop { .. }
+            | HookEvent::ResponseReceived { .. } => {
                 // These are handled at the FfiTaskTool level or not relevant
             }
         }

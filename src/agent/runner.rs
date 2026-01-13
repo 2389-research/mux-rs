@@ -143,6 +143,18 @@ impl SubAgent {
         &self.messages
     }
 
+    /// Get the current accumulated token usage.
+    ///
+    /// Useful for retrieving partial usage after an error (e.g., max iterations).
+    pub fn usage(&self) -> &Usage {
+        &self.usage
+    }
+
+    /// Get the current tool use count.
+    pub fn tool_use_count(&self) -> usize {
+        self.tool_use_count
+    }
+
     /// Fork conversation context from a parent agent.
     pub fn fork_messages(&mut self, parent_messages: Vec<Message>) {
         self.messages = parent_messages;
@@ -217,6 +229,27 @@ impl SubAgent {
             self.usage.cache_read_tokens += response.usage.cache_read_tokens;
             self.usage.cache_write_tokens += response.usage.cache_write_tokens;
 
+            // Fire ResponseReceived hook for streaming callbacks
+            let response_text = response.text();
+            let tool_uses: Vec<(String, String, serde_json::Value)> = response
+                .content
+                .iter()
+                .filter_map(|block| {
+                    if let ContentBlock::ToolUse { name, id, input } = block {
+                        Some((name.clone(), id.clone(), input.clone()))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+
+            self.fire_hook(HookEvent::ResponseReceived {
+                agent_id: self.agent_id.clone(),
+                text: response_text.clone(),
+                tool_uses: tool_uses.clone(),
+            })
+            .await?;
+
             // Check for tool use
             if response.has_tool_use() {
                 // Add assistant response to history
@@ -260,6 +293,7 @@ impl SubAgent {
                         // Fire PostToolUse hook with the effective input (after any transform)
                         self.fire_hook(HookEvent::PostToolUse {
                             tool_name: name.clone(),
+                            tool_use_id: id.clone(),
                             input: effective_input,
                             result: tool_result.clone(),
                         })

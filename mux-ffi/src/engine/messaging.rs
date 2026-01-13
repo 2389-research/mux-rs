@@ -1,53 +1,171 @@
-// ABOUTME: Message handling and agentic loop for MuxEngine.
-// ABOUTME: Contains do_send_message and execute_task_tool for LLM interactions.
+// ABOUTME: Message handling using SubAgent for unified agentic execution.
+// ABOUTME: All tool execution goes through SubAgent with hooks for callbacks.
 
 use super::persistence::StoredMessage;
 use super::subagent::TaskToolEventProxy;
+use super::tool_wrappers::{CustomToolWrapper, McpToolWrapper};
 use super::MuxEngine;
 use crate::callback::{ChatCallback, ChatResult, ToolUseRequest};
 use crate::task_tool::FfiTaskTool;
 use crate::types::Provider;
-use mux::agent::AgentRegistry;
+use async_trait::async_trait;
+use mux::agent::{AgentDefinition, AgentRegistry, SubAgent};
+use mux::hook::{Hook, HookAction, HookEvent, HookRegistry};
 use mux::llm::GeminiClient;
 use mux::prelude::{
-    AgentDefinition, AnthropicClient, ContentBlock, LlmClient, McpClient, Message, OpenAIClient,
-    Registry, Request, Role, StopReason, ToolDefinition,
+    AnthropicClient, ContentBlock, LlmClient, McpClient, Message, OpenAIClient, Registry, Role,
 };
 use mux::tool::Tool;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex as TokioMutex;
 
-/// Messaging implementation
+/// Hook that proxies SubAgent events to ChatCallback for streaming UI updates.
+struct ChatCallbackHook {
+    callback: Arc<Box<dyn ChatCallback>>,
+}
+
+impl ChatCallbackHook {
+    fn new(callback: Arc<Box<dyn ChatCallback>>) -> Self {
+        Self { callback }
+    }
+}
+
+#[async_trait]
+impl Hook for ChatCallbackHook {
+    async fn on_event(&self, event: &HookEvent) -> Result<HookAction, anyhow::Error> {
+        let callback = self.callback.clone();
+
+        match event {
+            HookEvent::ResponseReceived { text, tool_uses, .. } => {
+                // Stream text to callback
+                if !text.is_empty() {
+                    let text = text.clone();
+                    tokio::task::spawn_blocking(move || {
+                        callback.on_text_delta(text);
+                    })
+                    .await
+                    .ok();
+                }
+
+                // Notify about tool uses
+                for (name, id, input) in tool_uses {
+                    let callback = self.callback.clone();
+                    let request = ToolUseRequest {
+                        id: id.clone(),
+                        tool_name: name.clone(),
+                        server_name: String::new(), // Not an MCP tool
+                        arguments: serde_json::to_string(input).unwrap_or_default(),
+                    };
+                    tokio::task::spawn_blocking(move || {
+                        callback.on_tool_use(request);
+                    })
+                    .await
+                    .ok();
+                }
+            }
+            HookEvent::PostToolUse {
+                tool_use_id, result, ..
+            } => {
+                let callback = self.callback.clone();
+                let tool_id = tool_use_id.clone();
+                let content = result.content.clone();
+
+                tokio::task::spawn_blocking(move || {
+                    callback.on_tool_result(tool_id, content);
+                })
+                .await
+                .ok();
+            }
+            _ => {}
+        }
+
+        Ok(HookAction::Continue)
+    }
+
+    fn accepts(&self, event: &HookEvent) -> bool {
+        matches!(
+            event,
+            HookEvent::ResponseReceived { .. } | HookEvent::PostToolUse { .. }
+        )
+    }
+}
+
+/// Messaging implementation using SubAgent for unified agentic execution.
 impl MuxEngine {
+    /// Build a tool Registry containing all available tools for this conversation.
+    async fn build_tool_registry(
+        &self,
+        workspace_id: &Option<String>,
+        captured_mcp_clients: &HashMap<String, Arc<TokioMutex<McpClient>>>,
+    ) -> Registry {
+        let registry = Registry::new();
+
+        // Add built-in tools (already Arc-wrapped)
+        for tool in &self.builtin_tools {
+            registry.register_arc(tool.clone()).await;
+        }
+
+        // Collect MCP tool wrappers while holding lock, then register after releasing
+        let mcp_wrappers: Vec<McpToolWrapper> = if let Some(ws_id) = workspace_id {
+            let clients = self.mcp_clients.read();
+            clients
+                .get(ws_id)
+                .map(|workspace_clients| {
+                    workspace_clients
+                        .iter()
+                        .flat_map(|(server_name, handle)| {
+                            handle.tools.iter().filter_map(|tool_def| {
+                                captured_mcp_clients.get(server_name).map(|client| {
+                                    McpToolWrapper::new(
+                                        server_name.clone(),
+                                        tool_def.name.clone(),
+                                        tool_def.description.clone(),
+                                        tool_def.input_schema.clone(),
+                                        client.clone(),
+                                    )
+                                })
+                            })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        // Lock released, now register
+        for wrapper in mcp_wrappers {
+            registry.register(wrapper).await;
+        }
+
+        // Collect custom tool wrappers while holding lock, then register after releasing
+        let custom_wrappers: Vec<CustomToolWrapper> = {
+            let custom_tools = self.custom_tools.read();
+            custom_tools
+                .values()
+                .map(|bridge| CustomToolWrapper::new(bridge.clone()))
+                .collect()
+        };
+        // Lock released, now register
+        for wrapper in custom_wrappers {
+            registry.register(wrapper).await;
+        }
+
+        registry
+    }
+
     pub(super) async fn do_send_message(
         &self,
         conversation_id: String,
         content: String,
         callback: Arc<Box<dyn ChatCallback>>,
     ) -> Result<ChatResult, String> {
-        // Add user message to history
-        {
-            let mut history = self.message_history.write();
-            let messages = history
-                .entry(conversation_id.clone())
-                .or_insert_with(Vec::new);
-            messages.push(StoredMessage {
-                role: Role::User,
-                content: vec![ContentBlock::text(content.clone())],
-            });
-        }
-
-        // Persist user message to disk
-        self.save_messages(&conversation_id);
-
         // Get current provider and create appropriate client
         let provider = self.default_provider.read().clone();
 
-        // Build client based on provider type (same pattern as execute_task_tool)
+        // Build client based on provider type
         let client: Arc<dyn LlmClient> = match &provider {
             Provider::Custom { name } => {
-                // For custom providers, use registered callback
                 match self.callback_providers.read().get(name).cloned() {
                     Some(callback_client) => callback_client as Arc<dyn LlmClient>,
                     None => {
@@ -61,7 +179,6 @@ impl MuxEngine {
                 }
             }
             _ => {
-                // For cloud providers, get API key from config
                 let config = self.api_keys.read().get(&provider).cloned();
                 match config {
                     Some(c) if !c.api_key.is_empty() => match &provider {
@@ -77,25 +194,26 @@ impl MuxEngine {
                         Provider::Custom { .. } => unreachable!(),
                     },
                     _ => {
-                        // Fallback to echo if no API key for cloud provider
+                        // Fallback to echo if no API key
                         let echo_text = format!("(No API key set) Echo: {}", content);
                         callback.on_text_delta(echo_text.clone());
 
-                        // Store assistant response
+                        // Store in history
                         {
                             let mut history = self.message_history.write();
-                            if let Some(messages) = history.get_mut(&conversation_id) {
-                                messages.push(StoredMessage {
-                                    role: Role::Assistant,
-                                    content: vec![ContentBlock::text(echo_text.clone())],
-                                });
-                            }
+                            let messages = history
+                                .entry(conversation_id.clone())
+                                .or_insert_with(Vec::new);
+                            messages.push(StoredMessage {
+                                role: Role::User,
+                                content: vec![ContentBlock::text(content.clone())],
+                            });
+                            messages.push(StoredMessage {
+                                role: Role::Assistant,
+                                content: vec![ContentBlock::text(echo_text.clone())],
+                            });
                         }
-
-                        // Persist to disk
                         self.save_messages(&conversation_id);
-
-                        // Check context warning before completing
                         self.check_and_warn_context(&conversation_id, callback.as_ref().as_ref());
 
                         return Ok(ChatResult {
@@ -105,7 +223,7 @@ impl MuxEngine {
                             input_tokens: 0,
                             output_tokens: 0,
                             context_usage: self
-                                .get_context_usage(conversation_id)
+                                .get_context_usage(conversation_id.clone())
                                 .unwrap_or_default(),
                         });
                     }
@@ -113,13 +231,22 @@ impl MuxEngine {
             }
         };
 
-        // Get workspace ID for tool lookup
+        // Get workspace and model configuration
         let workspace_id = self.get_workspace_for_conversation(&conversation_id);
+        let model = match &provider {
+            Provider::Custom { name } => name.clone(),
+            _ => self
+                .get_model_for_conversation(&conversation_id)
+                .or_else(|| self.get_default_model(provider.clone()))
+                .ok_or_else(|| {
+                    format!(
+                        "No model configured. Set default_model via set_provider_config for {:?}",
+                        provider
+                    )
+                })?,
+        };
 
-        // Capture MCP clients for the duration of this message processing.
-        // This prevents race conditions if user switches workspaces mid-execution.
-        // We clone the Arc<TokioMutex<McpClient>> references so they remain valid
-        // even if the workspace is disconnected.
+        // Capture MCP clients to prevent race conditions
         let captured_mcp_clients: HashMap<String, Arc<TokioMutex<McpClient>>> = workspace_id
             .as_ref()
             .map(|ws_id| {
@@ -136,316 +263,151 @@ impl MuxEngine {
             })
             .unwrap_or_default();
 
-        // Get available tools for this workspace
-        let tools: Vec<ToolDefinition> = workspace_id
-            .as_ref()
-            .map(|ws_id| self.get_workspace_tools(ws_id))
-            .unwrap_or_default();
+        // Build tool Registry with all available tools
+        let tool_registry = self
+            .build_tool_registry(&workspace_id, &captured_mcp_clients)
+            .await;
 
-        // Get model from workspace config, falling back to provider default
-        // For custom providers, use a placeholder since the callback handles model selection internally
-        let model = match &provider {
-            Provider::Custom { name } => {
-                // Custom providers handle model selection internally via callback
-                // Use provider name as placeholder for logging/tracking
-                name.clone()
-            }
-            _ => self
-                .get_model_for_conversation(&conversation_id)
-                .or_else(|| self.get_default_model(provider.clone()))
-                .ok_or_else(|| {
-                    format!(
-                        "No model configured. Set default_model via set_provider_config for {:?}",
-                        provider
+        // Build system prompt
+        let (workspace_path, custom_prompt) = workspace_id
+            .as_ref()
+            .and_then(|ws_id| {
+                self.workspaces.read().get(ws_id).map(|ws| {
+                    (
+                        ws.path.clone().unwrap_or_else(|| "~".to_string()),
+                        ws.system_prompt.clone(),
                     )
-                })?,
+                })
+            })
+            .unwrap_or_else(|| ("~".to_string(), None));
+
+        let tool_list: String = tool_registry
+            .to_definitions()
+            .await
+            .iter()
+            .map(|t| format!("- {}: {}", t.name, t.description))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let base_prompt = custom_prompt.unwrap_or_else(|| {
+            "You are a helpful AI assistant with access to local tools.".to_string()
+        });
+
+        let system_prompt = format!(
+            "{}\n\n\
+            Available tools:\n{}\n\n\
+            IMPORTANT: When using file tools, always use ABSOLUTE paths (starting with / or ~).\n\
+            The workspace directory is: {}\n\
+            For example, use '{}/file.txt' instead of just 'file.txt'.",
+            base_prompt, tool_list, workspace_path, workspace_path
+        );
+
+        // Create AgentDefinition with iteration limit
+        const MAX_AGENTIC_ITERATIONS: usize = 50;
+        let definition = AgentDefinition::new("chat", &system_prompt)
+            .model(&model)
+            .max_iterations(MAX_AGENTIC_ITERATIONS);
+
+        // Get existing conversation history
+        let existing_messages: Vec<Message> = {
+            let history = self.message_history.read();
+            history
+                .get(&conversation_id)
+                .map(|msgs| {
+                    msgs.iter()
+                        .map(|m| Message {
+                            role: m.role,
+                            content: m.content.clone(),
+                        })
+                        .collect()
+                })
+                .unwrap_or_default()
         };
 
-        let mut total_tool_use_count = 0u32;
-        let mut total_input_tokens = 0u32;
-        let mut total_output_tokens = 0u32;
-        let mut full_text = String::new();
+        // Create SubAgent with conversation history
+        let mut subagent = if existing_messages.is_empty() {
+            SubAgent::new(definition, client, tool_registry)
+        } else {
+            // Use a unique ID for this conversation's agent
+            SubAgent::resume(
+                conversation_id.clone(),
+                definition,
+                client,
+                tool_registry,
+                existing_messages,
+            )
+        };
 
-        // Agentic loop: keep going while the LLM wants to use tools
-        // Limit iterations to prevent runaway loops from misbehaving LLM/MCP servers
-        const MAX_AGENTIC_ITERATIONS: u32 = 50;
-        let mut iteration_count = 0u32;
+        // Attach hook registry with ChatCallbackHook for streaming
+        let hook_registry = Arc::new(HookRegistry::new());
+        hook_registry
+            .register(ChatCallbackHook::new(callback.clone()))
+            .await;
+        subagent = subagent.with_hooks(hook_registry);
 
-        loop {
-            iteration_count += 1;
-            if iteration_count > MAX_AGENTIC_ITERATIONS {
-                let warning = format!(
-                    "\n\n[Agentic loop terminated after {} iterations to prevent runaway execution]",
-                    MAX_AGENTIC_ITERATIONS
-                );
-                callback.on_text_delta(warning.clone());
-                full_text.push_str(&warning);
-                break;
-            }
-            // Build message history for context - preserves ToolUse/ToolResult structure
-            let messages: Vec<Message> = {
-                let history = self.message_history.read();
-                history
-                    .get(&conversation_id)
-                    .map(|msgs| {
-                        msgs.iter()
-                            .map(|m| Message {
-                                role: m.role,
-                                content: m.content.clone(),
-                            })
-                            .collect()
-                    })
-                    .unwrap_or_default()
-            };
-
-            // Build system prompt with tool guidance
-            let (workspace_path, custom_prompt) = workspace_id
-                .as_ref()
-                .and_then(|ws_id| {
-                    self.workspaces.read().get(ws_id).map(|ws| {
-                        (
-                            ws.path.clone().unwrap_or_else(|| "~".to_string()),
-                            ws.system_prompt.clone(),
-                        )
-                    })
-                })
-                .unwrap_or_else(|| ("~".to_string(), None));
-
-            let tool_list: String = tools
-                .iter()
-                .map(|t| format!("- {}: {}", t.name, t.description))
-                .collect::<Vec<_>>()
-                .join("\n");
-
-            // Use custom prompt if set, otherwise use default
-            let base_prompt = custom_prompt.unwrap_or_else(|| {
-                "You are a helpful AI assistant with access to local tools.".to_string()
-            });
-
-            let system_prompt = format!(
-                "{}\n\n\
-                Available tools:\n{}\n\n\
-                IMPORTANT: When using file tools, always use ABSOLUTE paths (starting with / or ~).\n\
-                The workspace directory is: {}\n\
-                For example, use '{}/file.txt' instead of just 'file.txt'.",
-                base_prompt, tool_list, workspace_path, workspace_path
-            );
-
-            // Create request with tools and system prompt
-            let mut request = Request::new(&model)
-                .system(&system_prompt)
-                .messages(messages)
-                .max_tokens(4096);
-
-            if !tools.is_empty() {
-                request = request.tools(tools.clone());
-            }
-
-            // Use non-streaming for tool use to get complete response
-            let response = client
-                .create_message(&request)
-                .await
-                .map_err(|e| e.to_string())?;
-
-            total_input_tokens += response.usage.input_tokens;
-            total_output_tokens += response.usage.output_tokens;
-
-            // Process the response content
-            // Tuple: (tool_use_id, qualified_name "server:tool", arguments)
-            let mut tool_uses: Vec<(String, String, serde_json::Value)> = Vec::new();
-            let mut response_text = String::new();
-
-            for block in &response.content {
-                match block {
-                    ContentBlock::Text { text } => {
-                        response_text.push_str(text);
-                        callback.on_text_delta(text.clone());
-                    }
-                    ContentBlock::ToolUse { id, name, input } => {
-                        tool_uses.push((id.clone(), name.clone(), input.clone()));
-                    }
-                    ContentBlock::ToolResult { .. } => {
-                        // Should not appear in assistant response
-                    }
-                }
-            }
-
-            full_text.push_str(&response_text);
-
-            // If no tool uses, we're done
-            if tool_uses.is_empty() || response.stop_reason != StopReason::ToolUse {
-                // Store final assistant response
-                if !response_text.is_empty() {
-                    let mut history = self.message_history.write();
-                    if let Some(messages) = history.get_mut(&conversation_id) {
-                        messages.push(StoredMessage {
-                            role: Role::Assistant,
-                            content: vec![ContentBlock::text(response_text)],
-                        });
-                    }
-                }
-                self.save_messages(&conversation_id);
-                break;
-            }
-
-            // Process tool uses
-            let mut tool_results: Vec<ContentBlock> = Vec::new();
-
-            for (tool_use_id, tool_name, arguments) in tool_uses {
-                total_tool_use_count += 1;
-
-                // Check if this is a built-in tool (no colon in name)
-                let builtin_tool = self.builtin_tools.iter().find(|t| t.name() == tool_name);
-
-                // Check if this is a custom tool
-                let custom_tool = self.custom_tools.read().get(&tool_name).cloned();
-
-                if let Some(tool) = builtin_tool {
-                    // Execute built-in tool
-                    callback.on_tool_use(ToolUseRequest {
-                        id: tool_use_id.clone(),
-                        tool_name: tool_name.clone(),
-                        server_name: "builtin".to_string(),
-                        arguments: serde_json::to_string(&arguments).unwrap_or_default(),
-                    });
-
-                    match tool.execute(arguments).await {
-                        Ok(result) => {
-                            callback.on_tool_result(tool_use_id.clone(), result.content.clone());
-                            if result.is_error {
-                                tool_results
-                                    .push(ContentBlock::tool_error(&tool_use_id, &result.content));
-                            } else {
-                                tool_results
-                                    .push(ContentBlock::tool_result(&tool_use_id, &result.content));
-                            }
-                        }
-                        Err(e) => {
-                            let error_msg = format!("Tool execution failed: {}", e);
-                            callback.on_tool_result(tool_use_id.clone(), error_msg.clone());
-                            tool_results.push(ContentBlock::tool_error(&tool_use_id, &error_msg));
-                        }
-                    }
-                } else if let Some(tool) = custom_tool {
-                    // Execute custom tool from Swift
-                    callback.on_tool_use(ToolUseRequest {
-                        id: tool_use_id.clone(),
-                        tool_name: tool_name.clone(),
-                        server_name: "custom".to_string(),
-                        arguments: serde_json::to_string(&arguments).unwrap_or_default(),
-                    });
-
-                    match tool.execute(arguments).await {
-                        Ok(result) => {
-                            callback.on_tool_result(tool_use_id.clone(), result.content.clone());
-                            if result.is_error {
-                                tool_results
-                                    .push(ContentBlock::tool_error(&tool_use_id, &result.content));
-                            } else {
-                                tool_results
-                                    .push(ContentBlock::tool_result(&tool_use_id, &result.content));
-                            }
-                        }
-                        Err(e) => {
-                            let error_msg = format!("Tool execution failed: {}", e);
-                            callback.on_tool_result(tool_use_id.clone(), error_msg.clone());
-                            tool_results.push(ContentBlock::tool_error(&tool_use_id, &error_msg));
-                        }
-                    }
-                } else if tool_name == "task" {
-                    // Execute TaskTool for spawning subagents
-                    callback.on_tool_use(ToolUseRequest {
-                        id: tool_use_id.clone(),
-                        tool_name: tool_name.clone(),
-                        server_name: "builtin".to_string(),
-                        arguments: serde_json::to_string(&arguments).unwrap_or_default(),
-                    });
-
-                    match self.execute_task_tool(arguments.clone()).await {
-                        Ok(result) => {
-                            callback.on_tool_result(tool_use_id.clone(), result.content.clone());
-                            if result.is_error {
-                                tool_results
-                                    .push(ContentBlock::tool_error(&tool_use_id, &result.content));
-                            } else {
-                                tool_results
-                                    .push(ContentBlock::tool_result(&tool_use_id, &result.content));
-                            }
-                        }
-                        Err(e) => {
-                            let error_msg = format!("TaskTool execution failed: {}", e);
-                            callback.on_tool_result(tool_use_id.clone(), error_msg.clone());
-                            tool_results.push(ContentBlock::tool_error(&tool_use_id, &error_msg));
-                        }
-                    }
-                } else if let Some((server_name, mcp_tool_name)) = self.parse_tool_name(&tool_name)
-                {
-                    // Execute MCP tool (server:tool format)
-                    callback.on_tool_use(ToolUseRequest {
-                        id: tool_use_id.clone(),
-                        tool_name: mcp_tool_name.clone(),
-                        server_name: server_name.clone(),
-                        arguments: serde_json::to_string(&arguments).unwrap_or_default(),
-                    });
-
-                    match Self::execute_tool_with_captured_client(
-                        &captured_mcp_clients,
-                        &server_name,
-                        &mcp_tool_name,
-                        arguments,
-                    )
-                    .await
-                    {
-                        Ok(result) => {
-                            callback.on_tool_result(tool_use_id.clone(), result.clone());
-                            tool_results.push(ContentBlock::tool_result(&tool_use_id, &result));
-                        }
-                        Err(e) => {
-                            callback.on_tool_result(tool_use_id.clone(), format!("Error: {}", e));
-                            tool_results.push(ContentBlock::tool_error(&tool_use_id, &e));
-                        }
+        // Run the agent with the user's message
+        let result = match subagent.run(&content).await {
+            Ok(result) => result,
+            Err(e) => {
+                let error_str = e.to_string();
+                // Check if this is a max iterations error - handle gracefully
+                if error_str.contains("exceeded max iterations") {
+                    // Capture actual usage and tool count from the subagent
+                    let actual_usage = subagent.usage().clone();
+                    let actual_tool_count = subagent.tool_use_count();
+                    let termination_msg = format!(
+                        "Agent loop terminated after {} iterations to prevent infinite loops.",
+                        MAX_AGENTIC_ITERATIONS
+                    );
+                    mux::agent::SubAgentResult {
+                        agent_id: subagent.agent_id().to_string(),
+                        content: termination_msg,
+                        tool_use_count: actual_tool_count,
+                        usage: actual_usage,
+                        iterations: MAX_AGENTIC_ITERATIONS,
                     }
                 } else {
-                    // Unknown tool format
-                    let error_msg = format!("Unknown tool: {}", tool_name);
-                    tool_results.push(ContentBlock::tool_error(&tool_use_id, &error_msg));
-                    callback.on_tool_result(tool_use_id.clone(), error_msg);
+                    // On other errors, return without saving transcript.
+                    // This means the failed attempt is lost, but the conversation
+                    // remains consistent - user can retry with the same message.
+                    let error_msg = format!("Agent error: {}", e);
+                    callback.on_error(error_msg.clone());
+                    return Err(error_msg);
                 }
             }
+        };
 
-            // Store assistant response with tool uses - preserves ToolUse blocks
-            // This ensures Claude recognizes tool calls on subsequent iterations
-            {
-                let mut history = self.message_history.write();
-                if let Some(messages) = history.get_mut(&conversation_id) {
-                    // Store the full assistant response including ToolUse blocks
-                    messages.push(StoredMessage {
-                        role: Role::Assistant,
-                        content: response.content.clone(),
-                    });
-
-                    // Store tool results as user message with proper ToolResult blocks
-                    if !tool_results.is_empty() {
-                        messages.push(StoredMessage {
-                            role: Role::User,
-                            content: tool_results.clone(),
-                        });
-                    }
-                }
+        // Extract transcript and save to history
+        let transcript = subagent.transcript();
+        {
+            let mut history = self.message_history.write();
+            let messages = history
+                .entry(conversation_id.clone())
+                .or_insert_with(Vec::new);
+            messages.clear();
+            for msg in transcript {
+                messages.push(StoredMessage {
+                    role: msg.role,
+                    content: msg.content.clone(),
+                });
             }
-            self.save_messages(&conversation_id);
         }
+        self.save_messages(&conversation_id);
 
-        // Check context warning before completing
+        // Check context warning
         self.check_and_warn_context(&conversation_id, callback.as_ref().as_ref());
 
+        // Return result
+        let context_usage = self
+            .get_context_usage(conversation_id.clone())
+            .unwrap_or_default();
         Ok(ChatResult {
-            conversation_id: conversation_id.clone(),
-            final_text: full_text,
-            tool_use_count: total_tool_use_count,
-            input_tokens: total_input_tokens,
-            output_tokens: total_output_tokens,
-            context_usage: self.get_context_usage(conversation_id).unwrap_or_default(),
+            conversation_id,
+            final_text: result.content,
+            tool_use_count: result.tool_use_count as u32,
+            input_tokens: result.usage.input_tokens,
+            output_tokens: result.usage.output_tokens,
+            context_usage,
         })
     }
 
@@ -535,17 +497,25 @@ impl MuxEngine {
         let provider_clone = provider.clone();
         let api_key = provider_config.as_ref().map(|c| c.api_key.clone());
         let base_url = provider_config.as_ref().and_then(|c| c.base_url.clone());
-        let callback_providers = self.callback_providers.clone();
+
+        // For custom providers, capture the client Arc upfront to avoid race conditions
+        // (provider could be unregistered between validation and factory execution)
+        let captured_custom_client: Option<Arc<dyn LlmClient>> = match &provider {
+            Provider::Custom { name } => self
+                .callback_providers
+                .read()
+                .get(name)
+                .cloned()
+                .map(|c| c as Arc<dyn LlmClient>),
+            _ => None,
+        };
 
         // Create client factory
         let client_factory = move |_model: &str| -> Arc<dyn LlmClient> {
             match &provider_clone {
-                Provider::Custom { name } => callback_providers
-                    .read()
-                    .get(name)
-                    .cloned()
-                    .map(|c| c as Arc<dyn LlmClient>)
-                    .expect("Custom provider was validated at start of execute_task_tool"),
+                Provider::Custom { .. } => captured_custom_client
+                    .clone()
+                    .expect("Custom provider was captured at start of execute_task_tool"),
                 Provider::Anthropic => {
                     Arc::new(AnthropicClient::new(api_key.as_deref().unwrap_or("")))
                 }
