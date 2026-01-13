@@ -64,8 +64,14 @@ impl Hook for SubagentEventProxyHook {
                 .await
                 .ok();
             }
-            HookEvent::AgentStart { .. } | HookEvent::AgentStop { .. } => {
-                // These are handled at the FfiTaskTool level, not via hooks
+            HookEvent::AgentStart { .. }
+            | HookEvent::AgentStop { .. }
+            | HookEvent::SessionStart { .. }
+            | HookEvent::SessionEnd { .. }
+            | HookEvent::Stop { .. }
+            | HookEvent::SubagentStart { .. }
+            | HookEvent::SubagentStop { .. } => {
+                // These are handled at the FfiTaskTool level or not relevant
             }
         }
 

@@ -61,6 +61,14 @@ impl Hook for FfiHookBridge {
                 agent_id: agent_id.clone(),
                 iteration: *iteration as u32,
             },
+            // Session and subagent events - pass through without FFI callback
+            HookEvent::SessionStart { .. }
+            | HookEvent::SessionEnd { .. }
+            | HookEvent::Stop { .. }
+            | HookEvent::SubagentStart { .. }
+            | HookEvent::SubagentStop { .. } => {
+                return Ok(HookAction::Continue);
+            }
         };
 
         // Clone handler Arc to move into blocking task
