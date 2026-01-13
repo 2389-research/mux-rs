@@ -17,7 +17,7 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-apple-ios,aarch64-apple-ios-sim
+          targets: aarch64-apple-ios,aarch64-apple-ios-sim,aarch64-apple-darwin,x86_64-apple-darwin
 
       - name: Install uniffi-bindgen
         run: cargo install uniffi --features=cli
@@ -27,6 +27,20 @@ jobs:
 
       - name: Build iOS simulator
         run: cargo build --release --target aarch64-apple-ios-sim -p mux-ffi
+
+      - name: Build macOS ARM64
+        run: cargo build --release --target aarch64-apple-darwin -p mux-ffi
+
+      - name: Build macOS x86_64
+        run: cargo build --release --target x86_64-apple-darwin -p mux-ffi
+
+      - name: Create macOS universal binary
+        run: |
+          mkdir -p target/universal-macos/release
+          lipo -create \
+            target/aarch64-apple-darwin/release/libmux_ffi.a \
+            target/x86_64-apple-darwin/release/libmux_ffi.a \
+            -output target/universal-macos/release/libmux_ffi.a
 
       - name: Generate Swift bindings
         run: |
@@ -43,6 +57,8 @@ jobs:
             -library target/aarch64-apple-ios/release/libmux_ffi.a \
             -headers mux-ffi/bindings \
             -library target/aarch64-apple-ios-sim/release/libmux_ffi.a \
+            -headers mux-ffi/bindings \
+            -library target/universal-macos/release/libmux_ffi.a \
             -headers mux-ffi/bindings \
             -output dist/MuxFFI.xcframework
 
