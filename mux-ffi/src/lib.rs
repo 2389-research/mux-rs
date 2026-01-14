@@ -199,6 +199,7 @@ mod tests {
             context_limit: 4096,
             compaction_mode: CompactionMode::TruncateOldest,
             warning_threshold: 0.8,
+            compaction_model: None,
         };
         engine.set_model_context_config(config.clone());
 
@@ -237,6 +238,7 @@ mod tests {
             context_limit: 100, // Very small for testing
             compaction_mode: CompactionMode::TruncateOldest,
             warning_threshold: 0.5,
+            compaction_model: None,
         });
 
         // Create conversation
@@ -297,6 +299,7 @@ mod tests {
             context_limit: 50, // Very small - forces truncation
             compaction_mode: CompactionMode::TruncateOldest,
             warning_threshold: 0.5,
+            compaction_model: None,
         });
 
         let conv = engine.create_conversation(ws.id.clone(), "Test".to_string()).unwrap();
@@ -347,5 +350,211 @@ mod tests {
         // Cleanup
         engine.delete_workspace(ws1.id).unwrap();
         engine.delete_workspace(ws2.id).unwrap();
+    }
+
+    #[test]
+    fn test_auto_compaction_strategy_threshold() {
+        use crate::context::SMALL_CONTEXT_THRESHOLD;
+
+        // Verify the threshold is 8K tokens
+        assert_eq!(SMALL_CONTEXT_THRESHOLD, 8192);
+    }
+
+    #[test]
+    fn test_auto_compaction_small_context_uses_truncation() {
+        // Small context models (<=8K) should use truncation, not summarization
+        use mux::prelude::Role;
+
+        let engine = MuxEngine::new("/tmp/mux-test-auto-small".to_string()).unwrap();
+        let ws = engine.create_workspace("Auto Small Test".to_string(), None).unwrap();
+
+        engine.set_workspace_llm_config(&ws.id, "small-model");
+
+        // Configure model with context_limit <= SMALL_CONTEXT_THRESHOLD (8192)
+        // This should auto-select truncation
+        engine.set_model_context_config(ModelContextConfig {
+            model: "small-model".to_string(),
+            context_limit: 4096, // Small context - will use truncation
+            compaction_mode: CompactionMode::Summarize, // This is ignored - auto-selects based on limit
+            warning_threshold: 0.8,
+            compaction_model: None,
+        });
+
+        let conv = engine.create_conversation(ws.id.clone(), "Test".to_string()).unwrap();
+
+        // Add messages
+        for i in 0..5 {
+            engine.inject_test_message(
+                &conv.id,
+                Role::User,
+                &format!("Message {} with content to consume tokens", i),
+            );
+        }
+
+        let before = engine.get_message_count(&conv.id);
+
+        // Compact should succeed with truncation (no LLM call needed)
+        let result = engine.compact_context(conv.id.clone());
+        assert!(result.is_ok(), "Small context compaction should succeed via truncation");
+
+        // Cleanup
+        engine.delete_workspace(ws.id).unwrap();
+    }
+
+    #[test]
+    fn test_auto_compaction_large_context_needs_api_key() {
+        // Large context models (>8K) should attempt summarization
+        // Without an API key, this should fail with a clear error
+        use mux::prelude::Role;
+
+        let engine = MuxEngine::new("/tmp/mux-test-auto-large".to_string()).unwrap();
+        let ws = engine.create_workspace("Auto Large Test".to_string(), None).unwrap();
+
+        engine.set_workspace_llm_config(&ws.id, "large-model");
+
+        // Configure model with context_limit > SMALL_CONTEXT_THRESHOLD (8192)
+        // This should auto-select summarization
+        engine.set_model_context_config(ModelContextConfig {
+            model: "large-model".to_string(),
+            context_limit: 100000, // Large context - will attempt summarization
+            compaction_mode: CompactionMode::TruncateOldest, // This is ignored - auto-selects based on limit
+            warning_threshold: 0.8,
+            compaction_model: None,
+        });
+
+        let conv = engine.create_conversation(ws.id.clone(), "Test".to_string()).unwrap();
+
+        // Add a message
+        engine.inject_test_message(
+            &conv.id,
+            Role::User,
+            "Test message",
+        );
+
+        // Compact should fail because no API key is set for summarization
+        let result = engine.compact_context(conv.id.clone());
+        assert!(result.is_err(), "Large context compaction should fail without API key");
+        let error = result.unwrap_err().to_string();
+        assert!(error.contains("API key") || error.contains("summarization"),
+            "Error should mention API key or summarization: {}", error);
+
+        // Cleanup
+        engine.delete_workspace(ws.id).unwrap();
+    }
+
+    #[test]
+    fn test_auto_compaction_boundary_at_threshold() {
+        // Test the exact boundary: 8192 should use truncation, 8193 should use summarization
+        use crate::context::SMALL_CONTEXT_THRESHOLD;
+        use mux::prelude::Role;
+
+        let engine = MuxEngine::new("/tmp/mux-test-boundary".to_string()).unwrap();
+        let ws = engine.create_workspace("Boundary Test".to_string(), None).unwrap();
+
+        // Test at exactly threshold (should use truncation - succeeds without API key)
+        engine.set_workspace_llm_config(&ws.id, "boundary-model");
+        engine.set_model_context_config(ModelContextConfig {
+            model: "boundary-model".to_string(),
+            context_limit: SMALL_CONTEXT_THRESHOLD, // Exactly 8192
+            compaction_mode: CompactionMode::Summarize,
+            warning_threshold: 0.8,
+            compaction_model: None,
+        });
+
+        let conv = engine.create_conversation(ws.id.clone(), "Test".to_string()).unwrap();
+        engine.inject_test_message(&conv.id, Role::User, "Test");
+
+        // At threshold, should use truncation (no API key needed)
+        let result = engine.compact_context(conv.id.clone());
+        assert!(result.is_ok(), "At threshold (8192) should use truncation and succeed");
+
+        // Test just above threshold (should try summarization - fails without API key)
+        engine.set_model_context_config(ModelContextConfig {
+            model: "boundary-model".to_string(),
+            context_limit: SMALL_CONTEXT_THRESHOLD + 1, // 8193
+            compaction_mode: CompactionMode::TruncateOldest,
+            warning_threshold: 0.8,
+            compaction_model: None,
+        });
+
+        // Above threshold, should try summarization (needs API key)
+        let result2 = engine.compact_context(conv.id.clone());
+        assert!(result2.is_err(), "Above threshold (8193) should try summarization and fail without API key");
+
+        engine.delete_workspace(ws.id).unwrap();
+    }
+
+    #[test]
+    fn test_truncation_with_tiny_target() {
+        // Edge case: target_tokens smaller than any single message
+        use mux::prelude::Role;
+
+        let engine = MuxEngine::new("/tmp/mux-test-tiny".to_string()).unwrap();
+        let ws = engine.create_workspace("Tiny Test".to_string(), None).unwrap();
+
+        engine.set_workspace_llm_config(&ws.id, "tiny-model");
+
+        // Context limit of 10 tokens (effective = 8 after 0.8 safety margin)
+        engine.set_model_context_config(ModelContextConfig {
+            model: "tiny-model".to_string(),
+            context_limit: 10,
+            compaction_mode: CompactionMode::TruncateOldest,
+            warning_threshold: 0.8,
+            compaction_model: None,
+        });
+
+        let conv = engine.create_conversation(ws.id.clone(), "Test".to_string()).unwrap();
+
+        // Add a message that's larger than the effective limit (8 tokens)
+        // "This message is definitely longer than eight tokens" = ~12 tokens
+        engine.inject_test_message(
+            &conv.id,
+            Role::User,
+            "This message is definitely longer than eight tokens of text",
+        );
+
+        let before = engine.get_message_count(&conv.id);
+        assert_eq!(before, 1);
+
+        // Compact - the message won't fit within the tiny target
+        let result = engine.compact_context(conv.id.clone());
+        assert!(result.is_ok());
+
+        // With truncation, if no messages fit within target, ALL are removed.
+        // This is by design - truncation is meant for small context models where
+        // keeping oversized messages defeats the purpose. For large context models,
+        // summarization would be used instead (which compresses rather than removes).
+        let after = engine.get_message_count(&conv.id);
+        assert_eq!(after, 0, "Truncation removes all messages when none fit within target");
+
+        engine.delete_workspace(ws.id).unwrap();
+    }
+
+    #[test]
+    fn test_compaction_on_empty_conversation() {
+        // Edge case: compact an empty conversation
+        let engine = MuxEngine::new("/tmp/mux-test-empty".to_string()).unwrap();
+        let ws = engine.create_workspace("Empty Test".to_string(), None).unwrap();
+
+        engine.set_workspace_llm_config(&ws.id, "empty-model");
+        engine.set_model_context_config(ModelContextConfig {
+            model: "empty-model".to_string(),
+            context_limit: 4096,
+            compaction_mode: CompactionMode::TruncateOldest,
+            warning_threshold: 0.8,
+            compaction_model: None,
+        });
+
+        let conv = engine.create_conversation(ws.id.clone(), "Test".to_string()).unwrap();
+
+        // Compact empty conversation should succeed (no-op)
+        let result = engine.compact_context(conv.id.clone());
+        assert!(result.is_ok(), "Compacting empty conversation should succeed");
+
+        let usage = result.unwrap();
+        assert_eq!(usage.message_count, 0);
+        assert_eq!(usage.estimated_tokens, 0);
+
+        engine.delete_workspace(ws.id).unwrap();
     }
 }
