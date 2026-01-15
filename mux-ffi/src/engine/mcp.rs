@@ -3,8 +3,17 @@
 
 use super::helpers;
 use super::MuxEngine;
-use crate::types::{ApprovalDecision, McpServerConfig, McpTransportType};
+use crate::types::{
+    ApprovalDecision, McpPromptArgument, McpPromptInfo, McpPromptMessage, McpPromptResult,
+    McpResourceContent, McpResourceInfo, McpResourceTemplate, McpServerConfig, McpTransportType,
+    PromptArgumentValue,
+};
 use crate::MuxFfiError;
+use mux::mcp::{
+    McpPromptContent, McpPromptInfo as MuxMcpPromptInfo,
+    McpResourceContent as MuxMcpResourceContent, McpResourceInfo as MuxMcpResourceInfo,
+    McpResourceTemplate as MuxMcpResourceTemplate,
+};
 use mux::prelude::{
     McpClient, McpContentBlock, McpServerConfig as MuxMcpServerConfig, McpToolInfo, McpTransport,
     Tool, ToolDefinition,
@@ -14,10 +23,13 @@ use std::sync::Arc;
 use tokio::runtime::Runtime;
 use tokio::sync::Mutex as TokioMutex;
 
-/// Holds a connected MCP client and its available tools.
+/// Holds a connected MCP client and its cached capabilities.
 pub(super) struct McpClientHandle {
     pub client: Arc<TokioMutex<McpClient>>,
     pub tools: Vec<McpToolInfo>,
+    pub resources: Vec<MuxMcpResourceInfo>,
+    pub resource_templates: Vec<MuxMcpResourceTemplate>,
+    pub prompts: Vec<MuxMcpPromptInfo>,
     pub server_name: String,
 }
 
@@ -159,6 +171,218 @@ impl MuxEngine {
             });
         });
     }
+
+    /// List all MCP resources available across connected servers in a workspace.
+    pub fn list_mcp_resources(&self, workspace_id: String) -> Vec<McpResourceInfo> {
+        let clients = self.mcp_clients.read();
+        let Some(workspace_clients) = clients.get(&workspace_id) else {
+            return Vec::new();
+        };
+
+        workspace_clients
+            .values()
+            .flat_map(|handle| {
+                handle.resources.iter().map(|r| McpResourceInfo {
+                    uri: r.uri.clone(),
+                    name: r.name.clone(),
+                    description: r.description.clone(),
+                    mime_type: r.mime_type.clone(),
+                    server_name: handle.server_name.clone(),
+                })
+            })
+            .collect()
+    }
+
+    /// List all MCP resource templates available across connected servers in a workspace.
+    pub fn list_mcp_resource_templates(&self, workspace_id: String) -> Vec<McpResourceTemplate> {
+        let clients = self.mcp_clients.read();
+        let Some(workspace_clients) = clients.get(&workspace_id) else {
+            return Vec::new();
+        };
+
+        workspace_clients
+            .values()
+            .flat_map(|handle| {
+                handle.resource_templates.iter().map(|t| McpResourceTemplate {
+                    uri_template: t.uri_template.clone(),
+                    name: t.name.clone(),
+                    description: t.description.clone(),
+                    mime_type: t.mime_type.clone(),
+                    server_name: handle.server_name.clone(),
+                })
+            })
+            .collect()
+    }
+
+    /// List all MCP prompts available across connected servers in a workspace.
+    pub fn list_mcp_prompts(&self, workspace_id: String) -> Vec<McpPromptInfo> {
+        let clients = self.mcp_clients.read();
+        let Some(workspace_clients) = clients.get(&workspace_id) else {
+            return Vec::new();
+        };
+
+        workspace_clients
+            .values()
+            .flat_map(|handle| {
+                handle.prompts.iter().map(|p| McpPromptInfo {
+                    name: p.name.clone(),
+                    description: p.description.clone(),
+                    arguments: p
+                        .arguments
+                        .iter()
+                        .map(|a| McpPromptArgument {
+                            name: a.name.clone(),
+                            description: a.description.clone(),
+                            required: a.required,
+                        })
+                        .collect(),
+                    server_name: handle.server_name.clone(),
+                })
+            })
+            .collect()
+    }
+
+    /// Read the content of an MCP resource from a specific server.
+    pub fn read_mcp_resource(
+        self: Arc<Self>,
+        workspace_id: String,
+        server_name: String,
+        uri: String,
+    ) -> Result<Vec<McpResourceContent>, MuxFfiError> {
+        // Validate URI
+        if uri.is_empty() {
+            return Err(MuxFfiError::Engine {
+                message: "Resource URI cannot be empty".to_string(),
+            });
+        }
+
+        // Get client handle
+        let client = {
+            let clients = self.mcp_clients.read();
+            clients
+                .get(&workspace_id)
+                .and_then(|ws| ws.get(&server_name))
+                .map(|h| h.client.clone())
+                .ok_or_else(|| MuxFfiError::Engine {
+                    message: format!("MCP server '{}' not connected", server_name),
+                })?
+        };
+
+        // Spawn blocking thread for async work
+        let handle = std::thread::spawn(move || {
+            let rt = Runtime::new().map_err(|e| MuxFfiError::Engine {
+                message: format!("Failed to create runtime: {}", e),
+            })?;
+
+            rt.block_on(async move {
+                let locked = client.lock().await;
+                let contents = locked.read_resource(&uri).await.map_err(|e| MuxFfiError::Engine {
+                    message: e.to_string(),
+                })?;
+
+                // Convert mux types to FFI types
+                Ok(contents
+                    .into_iter()
+                    .map(|c| match c {
+                        MuxMcpResourceContent::Text { uri, mime_type, text } => {
+                            McpResourceContent::Text { uri, mime_type, text }
+                        }
+                        MuxMcpResourceContent::Blob { uri, mime_type, blob } => {
+                            McpResourceContent::Blob { uri, mime_type, blob }
+                        }
+                    })
+                    .collect())
+            })
+        });
+
+        handle
+            .join()
+            .map_err(|e| MuxFfiError::Engine {
+                message: format!("Thread panicked: {:?}", e),
+            })?
+    }
+
+    /// Get an MCP prompt from a specific server with the given arguments.
+    ///
+    /// NOTE: Prompt content is simplified to text for v1. Image content is converted
+    /// to a placeholder string like "[Image: 1234 bytes, type: image/png]" and binary
+    /// resource content becomes "[Binary data: N bytes]". The actual binary data is
+    /// not preserved. If you need raw image/binary support, file a feature request.
+    pub fn get_mcp_prompt(
+        self: Arc<Self>,
+        workspace_id: String,
+        server_name: String,
+        name: String,
+        arguments: Vec<PromptArgumentValue>,
+    ) -> Result<McpPromptResult, MuxFfiError> {
+        // Get client handle
+        let client = {
+            let clients = self.mcp_clients.read();
+            clients
+                .get(&workspace_id)
+                .and_then(|ws| ws.get(&server_name))
+                .map(|h| h.client.clone())
+                .ok_or_else(|| MuxFfiError::Engine {
+                    message: format!("MCP server '{}' not connected", server_name),
+                })?
+        };
+
+        // Convert Vec<PromptArgumentValue> to HashMap<String, String>
+        let args_map: Option<HashMap<String, String>> = if arguments.is_empty() {
+            None
+        } else {
+            Some(arguments.into_iter().map(|a| (a.name, a.value)).collect())
+        };
+
+        // Spawn blocking thread for async work
+        let handle = std::thread::spawn(move || {
+            let rt = Runtime::new().map_err(|e| MuxFfiError::Engine {
+                message: format!("Failed to create runtime: {}", e),
+            })?;
+
+            rt.block_on(async move {
+                let locked = client.lock().await;
+                let result = locked
+                    .get_prompt(&name, args_map)
+                    .await
+                    .map_err(|e| MuxFfiError::Engine {
+                        message: e.to_string(),
+                    })?;
+
+                // Convert to FFI type - simplify content to text only for v1
+                Ok(McpPromptResult {
+                    description: result.description,
+                    messages: result
+                        .messages
+                        .into_iter()
+                        .map(|m| McpPromptMessage {
+                            role: m.role,
+                            content: match m.content {
+                                McpPromptContent::Text { text } => text,
+                                McpPromptContent::Image { data, mime_type } => {
+                                    format!("[Image: {} bytes, type: {}]", data.len(), mime_type)
+                                }
+                                McpPromptContent::Resource { resource } => {
+                                    match resource {
+                                        MuxMcpResourceContent::Text { text, .. } => text,
+                                        MuxMcpResourceContent::Blob { blob, .. } => {
+                                            format!("[Binary data: {} bytes]", blob.len())
+                                        }
+                                    }
+                                }
+                            },
+                        })
+                        .collect(),
+                })
+            })
+        });
+
+        handle
+            .join()
+            .map_err(|e| MuxFfiError::Engine {
+                message: format!("Thread panicked: {:?}", e),
+            })?
+    }
 }
 
 /// MCP client management methods
@@ -192,9 +416,11 @@ impl MuxEngine {
             match self.connect_single_server(&config).await {
                 Ok(handle) => {
                     eprintln!(
-                        "Connected to MCP server '{}' with {} tools",
+                        "Connected to MCP server '{}' with {} tools, {} resources, {} prompts",
                         config.name,
-                        handle.tools.len()
+                        handle.tools.len(),
+                        handle.resources.len(),
+                        handle.prompts.len()
                     );
                     workspace_clients.insert(config.name.clone(), handle);
                 }
@@ -254,9 +480,87 @@ impl MuxEngine {
         // Fetch available tools
         let tools = client.list_tools().await.map_err(|e| e.to_string())?;
 
+        // Pagination safety limit to prevent infinite loops from buggy servers
+        const MAX_PAGES: usize = 100;
+
+        // Fetch resources (with pagination)
+        let mut resources = Vec::new();
+        let mut cursor: Option<String> = None;
+        let mut pages = 0;
+        loop {
+            if pages >= MAX_PAGES {
+                eprintln!(
+                    "Warning: Hit pagination limit for resources on server {}",
+                    config.name
+                );
+                break;
+            }
+            let result = client
+                .list_resources(cursor.as_deref())
+                .await
+                .map_err(|e| e.to_string())?;
+            resources.extend(result.resources);
+            cursor = result.next_cursor;
+            pages += 1;
+            if cursor.is_none() {
+                break;
+            }
+        }
+
+        // Fetch resource templates (with pagination)
+        let mut resource_templates = Vec::new();
+        cursor = None;
+        pages = 0;
+        loop {
+            if pages >= MAX_PAGES {
+                eprintln!(
+                    "Warning: Hit pagination limit for resource templates on server {}",
+                    config.name
+                );
+                break;
+            }
+            let result = client
+                .list_resource_templates(cursor.as_deref())
+                .await
+                .map_err(|e| e.to_string())?;
+            resource_templates.extend(result.resource_templates);
+            cursor = result.next_cursor;
+            pages += 1;
+            if cursor.is_none() {
+                break;
+            }
+        }
+
+        // Fetch prompts (with pagination)
+        let mut prompts = Vec::new();
+        cursor = None;
+        pages = 0;
+        loop {
+            if pages >= MAX_PAGES {
+                eprintln!(
+                    "Warning: Hit pagination limit for prompts on server {}",
+                    config.name
+                );
+                break;
+            }
+            let result = client
+                .list_prompts(cursor.as_deref())
+                .await
+                .map_err(|e| e.to_string())?;
+            prompts.extend(result.prompts);
+            cursor = result.next_cursor;
+            pages += 1;
+            if cursor.is_none() {
+                break;
+            }
+        }
+
         Ok(McpClientHandle {
             client: Arc::new(TokioMutex::new(client)),
             tools,
+            resources,
+            resource_templates,
+            prompts,
             server_name: config.name.clone(),
         })
     }
@@ -700,5 +1004,126 @@ mod tests {
         // No colon - returns None
         let result = engine.parse_tool_name("builtin_tool");
         assert!(result.is_none());
+    }
+
+    // ========================================================================
+    // MCP Resources Tests
+    // ========================================================================
+
+    #[test]
+    fn test_list_mcp_resources_empty_workspace() {
+        let engine = create_test_engine();
+        // Non-existent workspace returns empty list
+        let resources = engine.list_mcp_resources("nonexistent".to_string());
+        assert!(resources.is_empty());
+    }
+
+    #[test]
+    fn test_list_mcp_resources_no_connected_servers() {
+        let engine = create_test_engine();
+        let ws = engine
+            .create_workspace("Resources Empty".to_string(), None)
+            .unwrap();
+
+        // Workspace exists but no MCP servers connected - returns empty
+        let resources = engine.list_mcp_resources(ws.id.clone());
+        assert!(resources.is_empty());
+
+        engine.delete_workspace(ws.id).unwrap();
+    }
+
+    #[test]
+    fn test_list_mcp_resource_templates_empty_workspace() {
+        let engine = create_test_engine();
+        let templates = engine.list_mcp_resource_templates("nonexistent".to_string());
+        assert!(templates.is_empty());
+    }
+
+    #[test]
+    fn test_read_mcp_resource_server_not_connected() {
+        let engine = create_test_engine();
+        let ws = engine
+            .create_workspace("Read Resource".to_string(), None)
+            .unwrap();
+
+        let result = engine.clone().read_mcp_resource(
+            ws.id.clone(),
+            "unknown_server".to_string(),
+            "file:///test.txt".to_string(),
+        );
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("not connected"));
+
+        engine.delete_workspace(ws.id).unwrap();
+    }
+
+    #[test]
+    fn test_read_mcp_resource_empty_uri() {
+        let engine = create_test_engine();
+        let ws = engine
+            .create_workspace("Empty URI".to_string(), None)
+            .unwrap();
+
+        let result = engine.clone().read_mcp_resource(
+            ws.id.clone(),
+            "any_server".to_string(),
+            "".to_string(), // Empty URI
+        );
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("URI cannot be empty"));
+
+        engine.delete_workspace(ws.id).unwrap();
+    }
+
+    // ========================================================================
+    // MCP Prompts Tests
+    // ========================================================================
+
+    #[test]
+    fn test_list_mcp_prompts_empty_workspace() {
+        let engine = create_test_engine();
+        let prompts = engine.list_mcp_prompts("nonexistent".to_string());
+        assert!(prompts.is_empty());
+    }
+
+    #[test]
+    fn test_list_mcp_prompts_no_connected_servers() {
+        let engine = create_test_engine();
+        let ws = engine
+            .create_workspace("Prompts Empty".to_string(), None)
+            .unwrap();
+
+        let prompts = engine.list_mcp_prompts(ws.id.clone());
+        assert!(prompts.is_empty());
+
+        engine.delete_workspace(ws.id).unwrap();
+    }
+
+    #[test]
+    fn test_get_mcp_prompt_server_not_connected() {
+        let engine = create_test_engine();
+        let ws = engine
+            .create_workspace("Get Prompt".to_string(), None)
+            .unwrap();
+
+        let result = engine.clone().get_mcp_prompt(
+            ws.id.clone(),
+            "unknown_server".to_string(),
+            "test_prompt".to_string(),
+            vec![],
+        );
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("not connected"));
+
+        engine.delete_workspace(ws.id).unwrap();
     }
 }

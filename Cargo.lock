@@ -909,7 +909,7 @@ dependencies = [
 
 [[package]]
 name = "mux-ffi"
-version = "0.10.0"
+version = "0.12.0"
 dependencies = [
  "anyhow",
  "async-trait",

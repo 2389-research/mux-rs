@@ -141,6 +141,88 @@ pub struct ToolInfo {
     pub server_name: String,
 }
 
+// ============================================================================
+// MCP Resource Types
+// ============================================================================
+
+/// Information about an MCP resource.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct McpResourceInfo {
+    pub uri: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub mime_type: Option<String>,
+    pub server_name: String,
+}
+
+/// Content returned when reading an MCP resource.
+#[derive(Debug, Clone, uniffi::Enum)]
+pub enum McpResourceContent {
+    Text {
+        uri: String,
+        mime_type: Option<String>,
+        text: String,
+    },
+    Blob {
+        uri: String,
+        mime_type: Option<String>,
+        blob: String, // base64 encoded
+    },
+}
+
+/// A parameterized resource template from an MCP server.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct McpResourceTemplate {
+    pub uri_template: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub mime_type: Option<String>,
+    pub server_name: String,
+}
+
+// ============================================================================
+// MCP Prompt Types
+// ============================================================================
+
+/// Information about an MCP prompt.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct McpPromptInfo {
+    pub name: String,
+    pub description: Option<String>,
+    pub arguments: Vec<McpPromptArgument>,
+    pub server_name: String,
+}
+
+/// An argument definition for an MCP prompt.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct McpPromptArgument {
+    pub name: String,
+    pub description: Option<String>,
+    pub required: bool,
+}
+
+/// A message returned from an MCP prompt.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct McpPromptMessage {
+    pub role: String,
+    pub content: String,
+}
+
+/// Result of getting an MCP prompt.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct McpPromptResult {
+    pub description: Option<String>,
+    pub messages: Vec<McpPromptMessage>,
+}
+
+/// FFI-friendly argument value for prompt execution (alternative to HashMap).
+/// Distinct from McpPromptArgument which defines what arguments a prompt accepts.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct PromptArgumentValue {
+    pub name: String,
+    pub value: String,
+}
+
 #[derive(Debug, Clone, PartialEq, uniffi::Enum)]
 pub enum ApprovalDecision {
     Allow,
