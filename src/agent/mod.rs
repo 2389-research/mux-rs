@@ -12,7 +12,9 @@ mod transcript;
 pub use async_handle::{RunHandle, RunStatus};
 pub use definition::{AgentDefinition, AgentRegistry};
 pub use filter::FilteredRegistry;
-pub use presets::{all_presets, get_preset, Preset, EXPLORER, PLANNER, RESEARCHER, REVIEWER, WRITER};
+pub use presets::{
+    EXPLORER, PLANNER, Preset, RESEARCHER, REVIEWER, WRITER, all_presets, get_preset,
+};
 pub use runner::{SubAgent, SubAgentResult};
 pub use task::TaskTool;
 pub use transcript::{MemoryTranscriptStore, TranscriptStore};

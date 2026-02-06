@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use futures::Stream;
 
 use mux::error::LlmError;
-use mux::llm::{ContentBlock, LlmClient, Request, Response, StreamEvent, StopReason, Usage};
+use mux::llm::{ContentBlock, LlmClient, Request, Response, StopReason, StreamEvent, Usage};
 
 use crate::callback::LlmProvider;
 use crate::types::{ChatMessage, ChatRole, FfiToolDefinition, LlmRequest};
@@ -152,8 +152,9 @@ impl LlmClient for CallbackLlmClient {
         Box::pin(futures::stream::once(async {
             Err(LlmError::Api {
                 status: 0,
-                message: "Streaming not supported for callback LLM providers. Use non-streaming API."
-                    .to_string(),
+                message:
+                    "Streaming not supported for callback LLM providers. Use non-streaming API."
+                        .to_string(),
             })
         }))
     }

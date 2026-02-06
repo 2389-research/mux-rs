@@ -2,8 +2,8 @@
 // ABOUTME: Handles creation, listing, and deletion of workspaces and conversations.
 
 use super::MuxEngine;
-use crate::types::{Conversation, Workspace, WorkspaceSummary};
 use crate::MuxFfiError;
+use crate::types::{Conversation, Workspace, WorkspaceSummary};
 
 /// Workspace and Conversation CRUD operations
 #[uniffi::export]
@@ -16,7 +16,9 @@ impl MuxEngine {
         let workspace = Workspace::new(name, path);
         let id = workspace.id.clone();
 
-        self.workspaces.write().insert(id.clone(), workspace.clone());
+        self.workspaces
+            .write()
+            .insert(id.clone(), workspace.clone());
         self.conversations.write().insert(id, Vec::new());
 
         // Persist to disk
@@ -147,11 +149,11 @@ impl MuxEngine {
         prompt: Option<String>,
     ) -> Result<(), MuxFfiError> {
         let mut workspaces = self.workspaces.write();
-        let workspace = workspaces.get_mut(&workspace_id).ok_or_else(|| {
-            MuxFfiError::Engine {
+        let workspace = workspaces
+            .get_mut(&workspace_id)
+            .ok_or_else(|| MuxFfiError::Engine {
                 message: format!("Workspace not found: {}", workspace_id),
-            }
-        })?;
+            })?;
 
         workspace.system_prompt = prompt;
         drop(workspaces);

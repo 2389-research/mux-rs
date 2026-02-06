@@ -1,7 +1,9 @@
 // ABOUTME: Callback interfaces for async operations from Rust to Swift.
 // ABOUTME: Swift implements these traits to receive streaming updates.
 
-use crate::types::{HookEventType, HookResponse, LlmRequest, LlmResponse, SubagentResult, ToolExecutionResult};
+use crate::types::{
+    HookEventType, HookResponse, LlmRequest, LlmResponse, SubagentResult, ToolExecutionResult,
+};
 
 /// Represents a tool use request that will be sent to Swift for display/logging.
 #[derive(Debug, Clone, uniffi::Record)]
@@ -113,7 +115,13 @@ pub trait SubagentEventHandler: Send + Sync {
     fn on_tool_use(&self, subagent_id: String, tool_name: String, arguments_json: String);
 
     /// Called when a tool execution completes.
-    fn on_tool_result(&self, subagent_id: String, tool_name: String, result: String, is_error: bool);
+    fn on_tool_result(
+        &self,
+        subagent_id: String,
+        tool_name: String,
+        result: String,
+        is_error: bool,
+    );
 
     /// Called when the subagent completes an iteration of its think-act loop.
     fn on_iteration(&self, subagent_id: String, iteration: u32);

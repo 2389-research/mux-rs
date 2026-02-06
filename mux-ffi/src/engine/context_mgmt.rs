@@ -1,15 +1,15 @@
 // ABOUTME: Context management for MuxEngine - token estimation, compaction, usage tracking.
 // ABOUTME: Supports small context models by tracking and managing conversation size.
 
-use super::persistence::StoredMessage;
 use super::MuxEngine;
+use super::persistence::StoredMessage;
+use crate::MuxFfiError;
 use crate::callback::ChatCallback;
 use crate::context::{
-    effective_limit, estimate_tokens, CompactionMode, ContextUsage, ModelContextConfig,
-    SMALL_CONTEXT_THRESHOLD, SUMMARIZATION_PROMPT, SUMMARY_PREFIX,
+    CompactionMode, ContextUsage, ModelContextConfig, SMALL_CONTEXT_THRESHOLD,
+    SUMMARIZATION_PROMPT, SUMMARY_PREFIX, effective_limit, estimate_tokens,
 };
 use crate::types::Provider;
-use crate::MuxFfiError;
 use mux::llm::{AnthropicClient, GeminiClient, LlmClient, Message, OpenAIClient, Request};
 use mux::prelude::{ContentBlock, Role};
 use std::sync::Arc;
@@ -76,7 +76,11 @@ impl MuxEngine {
             model_configs.get(&model).map(|c| c.context_limit)
         });
 
-        Ok(ContextUsage::new(message_count, estimated_tokens, context_limit))
+        Ok(ContextUsage::new(
+            message_count,
+            estimated_tokens,
+            context_limit,
+        ))
     }
 
     /// Clear conversation context (start fresh, keep conversation ID).
@@ -358,11 +362,13 @@ impl MuxEngine {
                 .max_tokens(4096);
 
             // Call LLM
-            let response = client.create_message(&request).await.map_err(|e| {
-                MuxFfiError::Engine {
-                    message: format!("Summarization LLM call failed: {}", e),
-                }
-            })?;
+            let response =
+                client
+                    .create_message(&request)
+                    .await
+                    .map_err(|e| MuxFfiError::Engine {
+                        message: format!("Summarization LLM call failed: {}", e),
+                    })?;
 
             // Extract text from response
             let summary_text: String = response
@@ -431,16 +437,15 @@ impl MuxEngine {
         let provider = self.default_provider.read().clone();
 
         match &provider {
-            Provider::Custom { name } => {
-                self.callback_providers
-                    .read()
-                    .get(name)
-                    .cloned()
-                    .map(|c| c as Arc<dyn LlmClient>)
-                    .ok_or_else(|| MuxFfiError::Engine {
-                        message: format!("Custom provider '{}' not registered", name),
-                    })
-            }
+            Provider::Custom { name } => self
+                .callback_providers
+                .read()
+                .get(name)
+                .cloned()
+                .map(|c| c as Arc<dyn LlmClient>)
+                .ok_or_else(|| MuxFfiError::Engine {
+                    message: format!("Custom provider '{}' not registered", name),
+                }),
             _ => {
                 let api_config = self.api_keys.read().get(&provider).cloned();
                 match api_config {

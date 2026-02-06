@@ -438,9 +438,12 @@ mod tests {
         let tool_registry = Registry::new();
         let handler = Box::new(MockEventHandler::new());
 
-        let tool = FfiTaskTool::new(agent_registry, tool_registry, |_| {
-            panic!("Should not be called in schema test")
-        }, handler);
+        let tool = FfiTaskTool::new(
+            agent_registry,
+            tool_registry,
+            |_| panic!("Should not be called in schema test"),
+            handler,
+        );
 
         let schema = tool.schema();
         assert!(schema.get("properties").is_some());
@@ -459,9 +462,12 @@ mod tests {
         let tool_registry = Registry::new();
         let handler = Box::new(MockEventHandler::new());
 
-        let tool = FfiTaskTool::new(agent_registry, tool_registry, |_| {
-            panic!("Should not be called")
-        }, handler);
+        let tool = FfiTaskTool::new(
+            agent_registry,
+            tool_registry,
+            |_| panic!("Should not be called"),
+            handler,
+        );
 
         let result = tool
             .execute(serde_json::json!({

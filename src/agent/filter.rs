@@ -137,8 +137,16 @@ mod tests {
     #[tokio::test]
     async fn test_filtered_no_restrictions() {
         let registry = Registry::new();
-        registry.register(MockTool { name: "read".into() }).await;
-        registry.register(MockTool { name: "write".into() }).await;
+        registry
+            .register(MockTool {
+                name: "read".into(),
+            })
+            .await;
+        registry
+            .register(MockTool {
+                name: "write".into(),
+            })
+            .await;
 
         let filtered = FilteredRegistry::new(registry);
 
@@ -150,12 +158,24 @@ mod tests {
     #[tokio::test]
     async fn test_filtered_allowlist() {
         let registry = Registry::new();
-        registry.register(MockTool { name: "read".into() }).await;
-        registry.register(MockTool { name: "write".into() }).await;
-        registry.register(MockTool { name: "delete".into() }).await;
+        registry
+            .register(MockTool {
+                name: "read".into(),
+            })
+            .await;
+        registry
+            .register(MockTool {
+                name: "write".into(),
+            })
+            .await;
+        registry
+            .register(MockTool {
+                name: "delete".into(),
+            })
+            .await;
 
-        let filtered = FilteredRegistry::new(registry)
-            .allowed(Some(vec!["read".into(), "write".into()]));
+        let filtered =
+            FilteredRegistry::new(registry).allowed(Some(vec!["read".into(), "write".into()]));
 
         assert_eq!(filtered.count().await, 2);
         assert!(filtered.get("read").await.is_some());
@@ -166,12 +186,23 @@ mod tests {
     #[tokio::test]
     async fn test_filtered_denylist() {
         let registry = Registry::new();
-        registry.register(MockTool { name: "read".into() }).await;
-        registry.register(MockTool { name: "write".into() }).await;
-        registry.register(MockTool { name: "delete".into() }).await;
+        registry
+            .register(MockTool {
+                name: "read".into(),
+            })
+            .await;
+        registry
+            .register(MockTool {
+                name: "write".into(),
+            })
+            .await;
+        registry
+            .register(MockTool {
+                name: "delete".into(),
+            })
+            .await;
 
-        let filtered = FilteredRegistry::new(registry)
-            .denied(vec!["delete".into()]);
+        let filtered = FilteredRegistry::new(registry).denied(vec!["delete".into()]);
 
         assert_eq!(filtered.count().await, 2);
         assert!(filtered.get("read").await.is_some());
@@ -182,8 +213,16 @@ mod tests {
     #[tokio::test]
     async fn test_filtered_denylist_overrides_allowlist() {
         let registry = Registry::new();
-        registry.register(MockTool { name: "read".into() }).await;
-        registry.register(MockTool { name: "write".into() }).await;
+        registry
+            .register(MockTool {
+                name: "read".into(),
+            })
+            .await;
+        registry
+            .register(MockTool {
+                name: "write".into(),
+            })
+            .await;
 
         let filtered = FilteredRegistry::new(registry)
             .allowed(Some(vec!["read".into(), "write".into()]))
@@ -197,11 +236,18 @@ mod tests {
     #[tokio::test]
     async fn test_filtered_to_definitions() {
         let registry = Registry::new();
-        registry.register(MockTool { name: "read".into() }).await;
-        registry.register(MockTool { name: "write".into() }).await;
+        registry
+            .register(MockTool {
+                name: "read".into(),
+            })
+            .await;
+        registry
+            .register(MockTool {
+                name: "write".into(),
+            })
+            .await;
 
-        let filtered = FilteredRegistry::new(registry)
-            .allowed(Some(vec!["read".into()]));
+        let filtered = FilteredRegistry::new(registry).allowed(Some(vec!["read".into()]));
 
         let defs = filtered.to_definitions().await;
         assert_eq!(defs.len(), 1);

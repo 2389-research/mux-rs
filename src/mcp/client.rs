@@ -80,7 +80,11 @@ impl McpClient {
     }
 
     /// Send a notification (no response expected).
-    async fn notify(&self, method: &str, params: Option<serde_json::Value>) -> Result<(), McpError> {
+    async fn notify(
+        &self,
+        method: &str,
+        params: Option<serde_json::Value>,
+    ) -> Result<(), McpError> {
         let notification = McpNotification::new(method, params);
         self.transport.notify(notification).await
     }
@@ -199,7 +203,10 @@ impl McpClient {
     // ========================================================================
 
     /// List available prompts from the server.
-    pub async fn list_prompts(&self, cursor: Option<&str>) -> Result<McpPromptsListResult, McpError> {
+    pub async fn list_prompts(
+        &self,
+        cursor: Option<&str>,
+    ) -> Result<McpPromptsListResult, McpError> {
         let params = cursor.map(|c| serde_json::json!({ "cursor": c }));
         let result = self.request("prompts/list", params).await?;
         Ok(serde_json::from_value(result)?)
@@ -253,7 +260,9 @@ impl McpClient {
         params: McpSamplingParams,
     ) -> Result<McpSamplingResult, McpError> {
         let params_json = serde_json::to_value(params)?;
-        let result = self.request("sampling/createMessage", Some(params_json)).await?;
+        let result = self
+            .request("sampling/createMessage", Some(params_json))
+            .await?;
         Ok(serde_json::from_value(result)?)
     }
 

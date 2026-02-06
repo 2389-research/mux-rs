@@ -42,9 +42,7 @@ impl From<LegacyStoredMessage> for StoredMessage {
 /// Persistence helper methods
 impl MuxEngine {
     /// Load workspaces from disk. Returns empty HashMap if file doesn't exist or is invalid.
-    pub(super) fn load_workspaces(
-        data_dir: &PathBuf,
-    ) -> HashMap<String, crate::types::Workspace> {
+    pub(super) fn load_workspaces(data_dir: &PathBuf) -> HashMap<String, crate::types::Workspace> {
         let path = data_dir.join(WORKSPACES_FILE);
         match fs::read_to_string(&path) {
             Ok(contents) => serde_json::from_str(&contents).unwrap_or_else(|e| {
@@ -56,9 +54,7 @@ impl MuxEngine {
     }
 
     /// Load conversations from disk. Returns empty HashMap if file doesn't exist or is invalid.
-    pub(super) fn load_conversations(
-        data_dir: &PathBuf,
-    ) -> HashMap<String, Vec<Conversation>> {
+    pub(super) fn load_conversations(data_dir: &PathBuf) -> HashMap<String, Vec<Conversation>> {
         let path = data_dir.join(CONVERSATIONS_FILE);
         match fs::read_to_string(&path) {
             Ok(contents) => serde_json::from_str(&contents).unwrap_or_else(|e| {
@@ -107,9 +103,10 @@ impl MuxEngine {
     pub(super) fn save_workspaces(&self) {
         let path = self.data_dir.join(WORKSPACES_FILE);
         let workspaces = self.workspaces.read();
-        if let Err(e) =
-            fs::write(&path, serde_json::to_string_pretty(&*workspaces).unwrap_or_default())
-        {
+        if let Err(e) = fs::write(
+            &path,
+            serde_json::to_string_pretty(&*workspaces).unwrap_or_default(),
+        ) {
             eprintln!("Failed to save workspaces to {}: {}", path.display(), e);
         }
     }
@@ -132,9 +129,10 @@ impl MuxEngine {
         let path = messages_dir.join(format!("{}.json", conversation_id));
         let history = self.message_history.read();
         if let Some(messages) = history.get(conversation_id) {
-            if let Err(e) =
-                fs::write(&path, serde_json::to_string_pretty(messages).unwrap_or_default())
-            {
+            if let Err(e) = fs::write(
+                &path,
+                serde_json::to_string_pretty(messages).unwrap_or_default(),
+            ) {
                 eprintln!("Failed to save messages to {}: {}", path.display(), e);
             }
         }

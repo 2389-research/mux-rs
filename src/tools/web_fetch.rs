@@ -57,7 +57,10 @@ impl WebFetchTool {
         }
 
         // Replace common block elements with newlines
-        for tag in &["</p>", "</div>", "</h1>", "</h2>", "</h3>", "</h4>", "</h5>", "</h6>", "<br>", "<br/>", "</li>", "</tr>"] {
+        for tag in &[
+            "</p>", "</div>", "</h1>", "</h2>", "</h3>", "</h4>", "</h5>", "</h6>", "<br>",
+            "<br/>", "</li>", "</tr>",
+        ] {
             result = result.replace(tag, &format!("{}\n", tag));
         }
 

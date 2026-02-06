@@ -83,7 +83,9 @@ mod tests {
         let engine = MuxEngine::new("/tmp/mux-test-crud".to_string()).unwrap();
 
         // Create
-        let ws = engine.create_workspace("Test Project".to_string(), None).unwrap();
+        let ws = engine
+            .create_workspace("Test Project".to_string(), None)
+            .unwrap();
         assert_eq!(ws.name, "Test Project");
 
         // List
@@ -98,14 +100,19 @@ mod tests {
     #[test]
     fn test_system_prompt() {
         let engine = MuxEngine::new("/tmp/mux-test-prompt".to_string()).unwrap();
-        let ws = engine.create_workspace("Prompt Test".to_string(), None).unwrap();
+        let ws = engine
+            .create_workspace("Prompt Test".to_string(), None)
+            .unwrap();
 
         // Default is None
         assert!(engine.get_system_prompt(ws.id.clone()).is_none());
 
         // Set custom prompt
         engine
-            .set_system_prompt(ws.id.clone(), Some("You are a pirate assistant.".to_string()))
+            .set_system_prompt(
+                ws.id.clone(),
+                Some("You are a pirate assistant.".to_string()),
+            )
             .unwrap();
         assert_eq!(
             engine.get_system_prompt(ws.id.clone()),
@@ -159,8 +166,14 @@ mod tests {
         );
 
         // Verify API keys
-        assert_eq!(engine.get_api_key(Provider::Anthropic), Some("sk-test".to_string()));
-        assert_eq!(engine.get_api_key(Provider::OpenAI), Some("sk-openai".to_string()));
+        assert_eq!(
+            engine.get_api_key(Provider::Anthropic),
+            Some("sk-test".to_string())
+        );
+        assert_eq!(
+            engine.get_api_key(Provider::OpenAI),
+            Some("sk-openai".to_string())
+        );
 
         // Verify default models
         assert_eq!(
@@ -212,7 +225,9 @@ mod tests {
     fn test_clear_context() {
         let engine = MuxEngine::new("/tmp/mux-test-clear".to_string()).unwrap();
         let ws = engine.create_workspace("Test".to_string(), None).unwrap();
-        let conv = engine.create_conversation(ws.id.clone(), "Test Conv".to_string()).unwrap();
+        let conv = engine
+            .create_conversation(ws.id.clone(), "Test Conv".to_string())
+            .unwrap();
 
         // Clear should work on empty conversation
         engine.clear_context(conv.id.clone()).unwrap();
@@ -230,7 +245,9 @@ mod tests {
         let engine = MuxEngine::new("/tmp/mux-test-context-flow".to_string()).unwrap();
 
         // Create workspace with model config
-        let ws = engine.create_workspace("Context Test".to_string(), None).unwrap();
+        let ws = engine
+            .create_workspace("Context Test".to_string(), None)
+            .unwrap();
 
         // Configure small context model
         engine.set_model_context_config(ModelContextConfig {
@@ -268,11 +285,17 @@ mod tests {
 
         let engine = MuxEngine::new("/tmp/mux-test-ctx-msg".to_string()).unwrap();
         let ws = engine.create_workspace("Test".to_string(), None).unwrap();
-        let conv = engine.create_conversation(ws.id.clone(), "Test Conv".to_string()).unwrap();
+        let conv = engine
+            .create_conversation(ws.id.clone(), "Test Conv".to_string())
+            .unwrap();
 
         // Inject some messages
         engine.inject_test_message(&conv.id, Role::User, "Hello, how are you?");
-        engine.inject_test_message(&conv.id, Role::Assistant, "I'm doing well, thanks for asking!");
+        engine.inject_test_message(
+            &conv.id,
+            Role::Assistant,
+            "I'm doing well, thanks for asking!",
+        );
 
         // Check usage reflects messages
         let usage = engine.get_context_usage(conv.id.clone()).unwrap();
@@ -288,7 +311,9 @@ mod tests {
         use mux::prelude::Role;
 
         let engine = MuxEngine::new("/tmp/mux-test-truncate".to_string()).unwrap();
-        let ws = engine.create_workspace("Truncate Test".to_string(), None).unwrap();
+        let ws = engine
+            .create_workspace("Truncate Test".to_string(), None)
+            .unwrap();
 
         // Set workspace LLM config so model is known
         engine.set_workspace_llm_config(&ws.id, "truncate-test-model");
@@ -302,14 +327,19 @@ mod tests {
             compaction_model: None,
         });
 
-        let conv = engine.create_conversation(ws.id.clone(), "Test".to_string()).unwrap();
+        let conv = engine
+            .create_conversation(ws.id.clone(), "Test".to_string())
+            .unwrap();
 
         // Add many messages to exceed limit
         for i in 0..10 {
             engine.inject_test_message(
                 &conv.id,
                 Role::User,
-                &format!("This is message number {} with some extra text to use tokens", i),
+                &format!(
+                    "This is message number {} with some extra text to use tokens",
+                    i
+                ),
             );
         }
 
@@ -321,7 +351,10 @@ mod tests {
 
         let after_count = engine.get_message_count(&conv.id);
         assert!(after_count < before_count, "Messages should be truncated");
-        assert!(usage.estimated_tokens <= 40, "Should be under effective limit (50 * 0.8)");
+        assert!(
+            usage.estimated_tokens <= 40,
+            "Should be under effective limit (50 * 0.8)"
+        );
 
         // Cleanup
         engine.delete_workspace(ws.id).unwrap();
@@ -331,11 +364,19 @@ mod tests {
     fn test_get_workspace_for_conversation() {
         let engine = MuxEngine::new("/tmp/mux-test-ws-conv".to_string()).unwrap();
 
-        let ws1 = engine.create_workspace("Workspace 1".to_string(), None).unwrap();
-        let ws2 = engine.create_workspace("Workspace 2".to_string(), None).unwrap();
+        let ws1 = engine
+            .create_workspace("Workspace 1".to_string(), None)
+            .unwrap();
+        let ws2 = engine
+            .create_workspace("Workspace 2".to_string(), None)
+            .unwrap();
 
-        let conv1 = engine.create_conversation(ws1.id.clone(), "Conv 1".to_string()).unwrap();
-        let conv2 = engine.create_conversation(ws2.id.clone(), "Conv 2".to_string()).unwrap();
+        let conv1 = engine
+            .create_conversation(ws1.id.clone(), "Conv 1".to_string())
+            .unwrap();
+        let conv2 = engine
+            .create_conversation(ws2.id.clone(), "Conv 2".to_string())
+            .unwrap();
 
         // Verify correct workspace mapping
         let usage1 = engine.get_context_usage(conv1.id.clone()).unwrap();
@@ -366,7 +407,9 @@ mod tests {
         use mux::prelude::Role;
 
         let engine = MuxEngine::new("/tmp/mux-test-auto-small".to_string()).unwrap();
-        let ws = engine.create_workspace("Auto Small Test".to_string(), None).unwrap();
+        let ws = engine
+            .create_workspace("Auto Small Test".to_string(), None)
+            .unwrap();
 
         engine.set_workspace_llm_config(&ws.id, "small-model");
 
@@ -380,7 +423,9 @@ mod tests {
             compaction_model: None,
         });
 
-        let conv = engine.create_conversation(ws.id.clone(), "Test".to_string()).unwrap();
+        let conv = engine
+            .create_conversation(ws.id.clone(), "Test".to_string())
+            .unwrap();
 
         // Add messages
         for i in 0..5 {
@@ -395,7 +440,10 @@ mod tests {
 
         // Compact should succeed with truncation (no LLM call needed)
         let result = engine.compact_context(conv.id.clone());
-        assert!(result.is_ok(), "Small context compaction should succeed via truncation");
+        assert!(
+            result.is_ok(),
+            "Small context compaction should succeed via truncation"
+        );
 
         // Cleanup
         engine.delete_workspace(ws.id).unwrap();
@@ -408,7 +456,9 @@ mod tests {
         use mux::prelude::Role;
 
         let engine = MuxEngine::new("/tmp/mux-test-auto-large".to_string()).unwrap();
-        let ws = engine.create_workspace("Auto Large Test".to_string(), None).unwrap();
+        let ws = engine
+            .create_workspace("Auto Large Test".to_string(), None)
+            .unwrap();
 
         engine.set_workspace_llm_config(&ws.id, "large-model");
 
@@ -422,21 +472,25 @@ mod tests {
             compaction_model: None,
         });
 
-        let conv = engine.create_conversation(ws.id.clone(), "Test".to_string()).unwrap();
+        let conv = engine
+            .create_conversation(ws.id.clone(), "Test".to_string())
+            .unwrap();
 
         // Add a message
-        engine.inject_test_message(
-            &conv.id,
-            Role::User,
-            "Test message",
-        );
+        engine.inject_test_message(&conv.id, Role::User, "Test message");
 
         // Compact should fail because no API key is set for summarization
         let result = engine.compact_context(conv.id.clone());
-        assert!(result.is_err(), "Large context compaction should fail without API key");
+        assert!(
+            result.is_err(),
+            "Large context compaction should fail without API key"
+        );
         let error = result.unwrap_err().to_string();
-        assert!(error.contains("API key") || error.contains("summarization"),
-            "Error should mention API key or summarization: {}", error);
+        assert!(
+            error.contains("API key") || error.contains("summarization"),
+            "Error should mention API key or summarization: {}",
+            error
+        );
 
         // Cleanup
         engine.delete_workspace(ws.id).unwrap();
@@ -449,7 +503,9 @@ mod tests {
         use mux::prelude::Role;
 
         let engine = MuxEngine::new("/tmp/mux-test-boundary".to_string()).unwrap();
-        let ws = engine.create_workspace("Boundary Test".to_string(), None).unwrap();
+        let ws = engine
+            .create_workspace("Boundary Test".to_string(), None)
+            .unwrap();
 
         // Test at exactly threshold (should use truncation - succeeds without API key)
         engine.set_workspace_llm_config(&ws.id, "boundary-model");
@@ -461,12 +517,17 @@ mod tests {
             compaction_model: None,
         });
 
-        let conv = engine.create_conversation(ws.id.clone(), "Test".to_string()).unwrap();
+        let conv = engine
+            .create_conversation(ws.id.clone(), "Test".to_string())
+            .unwrap();
         engine.inject_test_message(&conv.id, Role::User, "Test");
 
         // At threshold, should use truncation (no API key needed)
         let result = engine.compact_context(conv.id.clone());
-        assert!(result.is_ok(), "At threshold (8192) should use truncation and succeed");
+        assert!(
+            result.is_ok(),
+            "At threshold (8192) should use truncation and succeed"
+        );
 
         // Test just above threshold (should try summarization - fails without API key)
         engine.set_model_context_config(ModelContextConfig {
@@ -479,7 +540,10 @@ mod tests {
 
         // Above threshold, should try summarization (needs API key)
         let result2 = engine.compact_context(conv.id.clone());
-        assert!(result2.is_err(), "Above threshold (8193) should try summarization and fail without API key");
+        assert!(
+            result2.is_err(),
+            "Above threshold (8193) should try summarization and fail without API key"
+        );
 
         engine.delete_workspace(ws.id).unwrap();
     }
@@ -490,7 +554,9 @@ mod tests {
         use mux::prelude::Role;
 
         let engine = MuxEngine::new("/tmp/mux-test-tiny".to_string()).unwrap();
-        let ws = engine.create_workspace("Tiny Test".to_string(), None).unwrap();
+        let ws = engine
+            .create_workspace("Tiny Test".to_string(), None)
+            .unwrap();
 
         engine.set_workspace_llm_config(&ws.id, "tiny-model");
 
@@ -503,7 +569,9 @@ mod tests {
             compaction_model: None,
         });
 
-        let conv = engine.create_conversation(ws.id.clone(), "Test".to_string()).unwrap();
+        let conv = engine
+            .create_conversation(ws.id.clone(), "Test".to_string())
+            .unwrap();
 
         // Add a message that's larger than the effective limit (8 tokens)
         // "This message is definitely longer than eight tokens" = ~12 tokens
@@ -525,7 +593,10 @@ mod tests {
         // keeping oversized messages defeats the purpose. For large context models,
         // summarization would be used instead (which compresses rather than removes).
         let after = engine.get_message_count(&conv.id);
-        assert_eq!(after, 0, "Truncation removes all messages when none fit within target");
+        assert_eq!(
+            after, 0,
+            "Truncation removes all messages when none fit within target"
+        );
 
         engine.delete_workspace(ws.id).unwrap();
     }
@@ -534,7 +605,9 @@ mod tests {
     fn test_compaction_on_empty_conversation() {
         // Edge case: compact an empty conversation
         let engine = MuxEngine::new("/tmp/mux-test-empty".to_string()).unwrap();
-        let ws = engine.create_workspace("Empty Test".to_string(), None).unwrap();
+        let ws = engine
+            .create_workspace("Empty Test".to_string(), None)
+            .unwrap();
 
         engine.set_workspace_llm_config(&ws.id, "empty-model");
         engine.set_model_context_config(ModelContextConfig {
@@ -545,11 +618,16 @@ mod tests {
             compaction_model: None,
         });
 
-        let conv = engine.create_conversation(ws.id.clone(), "Test".to_string()).unwrap();
+        let conv = engine
+            .create_conversation(ws.id.clone(), "Test".to_string())
+            .unwrap();
 
         // Compact empty conversation should succeed (no-op)
         let result = engine.compact_context(conv.id.clone());
-        assert!(result.is_ok(), "Compacting empty conversation should succeed");
+        assert!(
+            result.is_ok(),
+            "Compacting empty conversation should succeed"
+        );
 
         let usage = result.unwrap();
         assert_eq!(usage.message_count, 0);

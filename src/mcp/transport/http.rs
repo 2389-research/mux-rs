@@ -195,7 +195,9 @@ mod tests {
         assert!(transport.session_id.lock().await.is_none());
 
         // Set session ID
-        transport.set_session_id("test-session-123".to_string()).await;
+        transport
+            .set_session_id("test-session-123".to_string())
+            .await;
         assert_eq!(
             transport.session_id.lock().await.as_ref().unwrap(),
             "test-session-123"

@@ -2,7 +2,7 @@
 // ABOUTME: Supports custom HTTP-Referer and X-Title headers for app identification.
 
 use super::client::StreamEvent;
-use super::openai::{parse_sse_line, OpenAIError, OpenAIRequest, OpenAIResponse};
+use super::openai::{OpenAIError, OpenAIRequest, OpenAIResponse, parse_sse_line};
 use super::{ContentBlock, Request, Response, StopReason, Usage};
 use crate::error::LlmError;
 use async_trait::async_trait;
@@ -319,8 +319,7 @@ mod openrouter_test {
 
     #[test]
     fn test_client_with_default_model() {
-        let client =
-            OpenRouterClient::new("test-key").with_default_model("openai/gpt-4-turbo");
+        let client = OpenRouterClient::new("test-key").with_default_model("openai/gpt-4-turbo");
         assert_eq!(client.default_model, "openai/gpt-4-turbo");
     }
 

@@ -177,9 +177,7 @@ impl MuxEngine {
                     .ok_or_else(|| format!("Provider not configured: {:?}", provider))?;
 
                 match provider {
-                    Provider::Anthropic => {
-                        Arc::new(AnthropicClient::new(&provider_config.api_key))
-                    }
+                    Provider::Anthropic => Arc::new(AnthropicClient::new(&provider_config.api_key)),
                     Provider::OpenAI | Provider::Ollama => {
                         let mut c = OpenAIClient::new(&provider_config.api_key);
                         if let Some(url) = &provider_config.base_url {
@@ -296,9 +294,7 @@ impl MuxEngine {
                     .ok_or_else(|| format!("Provider not configured: {:?}", provider))?;
 
                 match provider {
-                    Provider::Anthropic => {
-                        Arc::new(AnthropicClient::new(&provider_config.api_key))
-                    }
+                    Provider::Anthropic => Arc::new(AnthropicClient::new(&provider_config.api_key)),
                     Provider::OpenAI | Provider::Ollama => {
                         let mut c = OpenAIClient::new(&provider_config.api_key);
                         if let Some(url) = &provider_config.base_url {

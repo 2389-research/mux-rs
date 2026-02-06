@@ -1,10 +1,10 @@
 // ABOUTME: Message handling using SubAgent for unified agentic execution.
 // ABOUTME: All tool execution goes through SubAgent with hooks for callbacks.
 
+use super::MuxEngine;
 use super::persistence::StoredMessage;
 use super::subagent::TaskToolEventProxy;
 use super::tool_wrappers::{CustomToolWrapper, McpToolWrapper};
-use super::MuxEngine;
 use crate::callback::{ChatCallback, ChatResult, ToolUseRequest};
 use crate::task_tool::FfiTaskTool;
 use crate::types::Provider;
@@ -37,7 +37,9 @@ impl Hook for ChatCallbackHook {
         let callback = self.callback.clone();
 
         match event {
-            HookEvent::ResponseReceived { text, tool_uses, .. } => {
+            HookEvent::ResponseReceived {
+                text, tool_uses, ..
+            } => {
                 // Stream text to callback
                 if !text.is_empty() {
                     let text = text.clone();
@@ -65,7 +67,9 @@ impl Hook for ChatCallbackHook {
                 }
             }
             HookEvent::PostToolUse {
-                tool_use_id, result, ..
+                tool_use_id,
+                result,
+                ..
             } => {
                 let callback = self.callback.clone();
                 let tool_id = tool_use_id.clone();
@@ -165,19 +169,17 @@ impl MuxEngine {
 
         // Build client based on provider type
         let client: Arc<dyn LlmClient> = match &provider {
-            Provider::Custom { name } => {
-                match self.callback_providers.read().get(name).cloned() {
-                    Some(callback_client) => callback_client as Arc<dyn LlmClient>,
-                    None => {
-                        let error = format!(
-                            "Custom LLM provider '{}' not registered. Call register_llm_provider first.",
-                            name
-                        );
-                        callback.on_error(error.clone());
-                        return Err(error);
-                    }
+            Provider::Custom { name } => match self.callback_providers.read().get(name).cloned() {
+                Some(callback_client) => callback_client as Arc<dyn LlmClient>,
+                None => {
+                    let error = format!(
+                        "Custom LLM provider '{}' not registered. Call register_llm_provider first.",
+                        name
+                    );
+                    callback.on_error(error.clone());
+                    return Err(error);
                 }
-            }
+            },
             _ => {
                 let config = self.api_keys.read().get(&provider).cloned();
                 match config {
@@ -967,9 +969,8 @@ mod tests {
             .unwrap();
 
         // Register mock LLM provider
-        let mock_provider = MockLlmProvider::new(vec![
-            MockLlmProvider::text_response("Hello from mock LLM!"),
-        ]);
+        let mock_provider =
+            MockLlmProvider::new(vec![MockLlmProvider::text_response("Hello from mock LLM!")]);
         engine.register_llm_provider("mock-llm".to_string(), Box::new(mock_provider));
 
         // Set custom provider
@@ -1111,9 +1112,10 @@ mod tests {
             .unwrap();
 
         // Mock that always returns tool calls - should hit MAX_AGENTIC_ITERATIONS
-        let mock_provider = MockLlmProvider::new(vec![
-            MockLlmProvider::tool_call_response("read_file", r#"{"path": "/tmp/loop.txt"}"#),
-        ]);
+        let mock_provider = MockLlmProvider::new(vec![MockLlmProvider::tool_call_response(
+            "read_file",
+            r#"{"path": "/tmp/loop.txt"}"#,
+        )]);
         engine.register_llm_provider("loop-test".to_string(), Box::new(mock_provider));
         engine.set_default_provider(Provider::Custom {
             name: "loop-test".to_string(),

@@ -209,8 +209,7 @@ mod tests {
 
     #[test]
     fn test_preset_apply_with_overrides() {
-        let def = AgentDefinition::new("custom-name", "custom prompt")
-            .max_iterations(100);
+        let def = AgentDefinition::new("custom-name", "custom prompt").max_iterations(100);
         let result = EXPLORER.apply(def);
 
         // Custom values should be preserved
@@ -234,18 +233,19 @@ mod tests {
 
     #[test]
     fn test_preset_apply_preserves_allowed_tools() {
-        let def = AgentDefinition::new("", "")
-            .allowed_tools(vec!["only_this_tool".to_string()]);
+        let def = AgentDefinition::new("", "").allowed_tools(vec!["only_this_tool".to_string()]);
         let result = EXPLORER.apply(def);
 
         // Definition's allowed_tools should be preserved
-        assert_eq!(result.allowed_tools, Some(vec!["only_this_tool".to_string()]));
+        assert_eq!(
+            result.allowed_tools,
+            Some(vec!["only_this_tool".to_string()])
+        );
     }
 
     #[test]
     fn test_preset_apply_preserves_denied_tools() {
-        let def = AgentDefinition::new("", "")
-            .denied_tools(vec!["blocked_tool".to_string()]);
+        let def = AgentDefinition::new("", "").denied_tools(vec!["blocked_tool".to_string()]);
         let result = EXPLORER.apply(def);
 
         // Definition's denied_tools should be preserved

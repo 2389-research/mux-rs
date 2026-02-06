@@ -214,8 +214,7 @@ impl RunHandle {
             let mut err_guard = self.error.lock().unwrap();
             *err_guard = Some(error);
         }
-        self.status
-            .store(RunStatus::Failed as u8, Ordering::SeqCst);
+        self.status.store(RunStatus::Failed as u8, Ordering::SeqCst);
         self.done.notify_waiters();
     }
 

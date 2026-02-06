@@ -11,7 +11,9 @@ pub enum Provider {
     Gemini,
     Ollama,
     /// Custom callback-based provider (e.g., Apple Foundation Models)
-    Custom { name: String },
+    Custom {
+        name: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, uniffi::Record)]
@@ -255,11 +257,26 @@ impl AgentConfig {
 
 #[derive(Debug, Clone, uniffi::Enum)]
 pub enum HookEventType {
-    PreToolUse { tool_name: String, input: String },
-    PostToolUse { tool_name: String, input: String, result: String },
-    AgentStart { agent_id: String, task: String },
-    AgentStop { agent_id: String },
-    Iteration { agent_id: String, iteration: u32 },
+    PreToolUse {
+        tool_name: String,
+        input: String,
+    },
+    PostToolUse {
+        tool_name: String,
+        input: String,
+        result: String,
+    },
+    AgentStart {
+        agent_id: String,
+        task: String,
+    },
+    AgentStop {
+        agent_id: String,
+    },
+    Iteration {
+        agent_id: String,
+        iteration: u32,
+    },
 }
 
 #[derive(Debug, Clone, uniffi::Enum)]
@@ -292,10 +309,16 @@ pub struct ToolExecutionResult {
 
 impl ToolExecutionResult {
     pub fn success(content: String) -> Self {
-        Self { content, is_error: false }
+        Self {
+            content,
+            is_error: false,
+        }
     }
     pub fn error(content: String) -> Self {
-        Self { content, is_error: true }
+        Self {
+            content,
+            is_error: true,
+        }
     }
 }
 

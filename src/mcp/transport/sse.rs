@@ -108,10 +108,11 @@ impl SseTransport {
         });
 
         // Wait for endpoint message with timeout
-        let messages_url = tokio::time::timeout(std::time::Duration::from_secs(10), messages_rx.recv())
-            .await
-            .map_err(|_| McpError::Connection("Timeout waiting for endpoint message".into()))?
-            .ok_or_else(|| McpError::Connection("No endpoint message received".into()))?;
+        let messages_url =
+            tokio::time::timeout(std::time::Duration::from_secs(10), messages_rx.recv())
+                .await
+                .map_err(|_| McpError::Connection("Timeout waiting for endpoint message".into()))?
+                .ok_or_else(|| McpError::Connection("No endpoint message received".into()))?;
 
         // If the endpoint is relative, resolve it against the base URL
         let full_messages_url = if messages_url.starts_with("http") {

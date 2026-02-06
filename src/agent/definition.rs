@@ -137,7 +137,10 @@ mod tests {
 
         assert_eq!(def.agent_type, "researcher");
         assert_eq!(def.model, Some("claude-sonnet-4-20250514".into()));
-        assert_eq!(def.allowed_tools, Some(vec!["search".into(), "read_file".into()]));
+        assert_eq!(
+            def.allowed_tools,
+            Some(vec!["search".into(), "read_file".into()])
+        );
         assert_eq!(def.denied_tools, vec!["write_file".to_string()]);
         assert!(def.fork_context);
         assert_eq!(def.max_iterations, 5);

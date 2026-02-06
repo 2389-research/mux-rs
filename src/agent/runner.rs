@@ -208,11 +208,12 @@ impl SubAgent {
             }
 
             // Build the request - model must be configured
-            let model = self
-                .definition
-                .model
-                .clone()
-                .ok_or_else(|| LlmError::Configuration("Agent definition has no model configured. Set model in AgentDefinition.".to_string()))?;
+            let model = self.definition.model.clone().ok_or_else(|| {
+                LlmError::Configuration(
+                    "Agent definition has no model configured. Set model in AgentDefinition."
+                        .to_string(),
+                )
+            })?;
 
             let request = Request::new(&model)
                 .system(&self.definition.system_prompt)
@@ -343,11 +344,7 @@ impl SubAgent {
     /// If the tool requires approval and an approval handler is set,
     /// this will request approval before executing. If denied, returns
     /// an error result without executing the tool.
-    async fn execute_tool(
-        &self,
-        name: &str,
-        input: serde_json::Value,
-    ) -> crate::tool::ToolResult {
+    async fn execute_tool(&self, name: &str, input: serde_json::Value) -> crate::tool::ToolResult {
         match self.tools.get(name).await {
             Some(tool) => {
                 // Check if tool requires approval
@@ -391,10 +388,9 @@ impl SubAgent {
                     Err(e) => crate::tool::ToolResult::error(e.to_string()),
                 }
             }
-            None => crate::tool::ToolResult::error(format!(
-                "Tool '{}' not found or not allowed",
-                name
-            )),
+            None => {
+                crate::tool::ToolResult::error(format!("Tool '{}' not found or not allowed", name))
+            }
         }
     }
 }

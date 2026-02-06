@@ -221,7 +221,11 @@ impl Tool for WebSearchTool {
         }
 
         // Format results
-        let mut output = format!("Found {} results for \"{}\":\n\n", results.len(), params.query);
+        let mut output = format!(
+            "Found {} results for \"{}\":\n\n",
+            results.len(),
+            params.query
+        );
         for (i, result) in results.iter().enumerate() {
             output.push_str(&format!(
                 "{}. {}\n   {}\n   {}\n\n",

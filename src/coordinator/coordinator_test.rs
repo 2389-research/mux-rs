@@ -34,7 +34,10 @@ async fn test_acquire_fails_when_locked_by_another() {
     assert!(result.is_err());
 
     match result.unwrap_err() {
-        LockError::AlreadyLocked { resource_id, owner_id } => {
+        LockError::AlreadyLocked {
+            resource_id,
+            owner_id,
+        } => {
             assert_eq!(resource_id, "resource-a");
             assert_eq!(owner_id, "agent-1");
         }
@@ -66,7 +69,11 @@ async fn test_release_fails_when_not_owner() {
     assert!(result.is_err());
 
     match result.unwrap_err() {
-        LockError::NotOwner { resource_id, owner_id, requester_id } => {
+        LockError::NotOwner {
+            resource_id,
+            owner_id,
+            requester_id,
+        } => {
             assert_eq!(resource_id, "resource-a");
             assert_eq!(owner_id, "agent-1");
             assert_eq!(requester_id, "agent-2");
@@ -124,7 +131,9 @@ async fn test_acquire_cancelled() {
     // Create a cancel future that completes immediately
     let cancel = async {};
 
-    let result = coordinator.acquire_with_cancel("agent-1", "resource-a", cancel).await;
+    let result = coordinator
+        .acquire_with_cancel("agent-1", "resource-a", cancel)
+        .await;
     assert!(result.is_err());
 
     match result.unwrap_err() {
@@ -192,5 +201,8 @@ async fn test_concurrent_acquire_same_resource() {
         }
     }
 
-    assert_eq!(success_count, 1, "Exactly one agent should acquire the lock");
+    assert_eq!(
+        success_count, 1,
+        "Exactly one agent should acquire the lock"
+    );
 }

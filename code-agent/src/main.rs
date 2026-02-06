@@ -229,7 +229,12 @@ async fn main() -> Result<()> {
     registry.register(ListFilesTool).await;
     registry.register(BashTool).await;
 
-    let tools: Vec<_> = registry.list().await.iter().map(|t| t.to_string()).collect();
+    let tools: Vec<_> = registry
+        .list()
+        .await
+        .iter()
+        .map(|t| t.to_string())
+        .collect();
     println!("Tools: {}\n", tools.join(", "));
 
     run_agent_loop(&registry).await

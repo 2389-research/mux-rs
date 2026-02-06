@@ -26,10 +26,21 @@ pub enum LockError {
 impl std::fmt::Display for LockError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            LockError::AlreadyLocked { resource_id, owner_id } => {
-                write!(f, "resource '{}' is locked by agent '{}'", resource_id, owner_id)
+            LockError::AlreadyLocked {
+                resource_id,
+                owner_id,
+            } => {
+                write!(
+                    f,
+                    "resource '{}' is locked by agent '{}'",
+                    resource_id, owner_id
+                )
             }
-            LockError::NotOwner { resource_id, owner_id, requester_id } => {
+            LockError::NotOwner {
+                resource_id,
+                owner_id,
+                requester_id,
+            } => {
                 write!(
                     f,
                     "agent '{}' does not own lock on '{}' (owned by '{}')",

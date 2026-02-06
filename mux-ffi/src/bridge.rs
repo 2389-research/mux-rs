@@ -52,7 +52,10 @@ impl Hook for FfiHookBridge {
                 agent_id: agent_id.clone(),
                 task: task.clone(),
             },
-            HookEvent::AgentStop { agent_id, result: _ } => HookEventType::AgentStop {
+            HookEvent::AgentStop {
+                agent_id,
+                result: _,
+            } => HookEventType::AgentStop {
                 agent_id: agent_id.clone(),
             },
             HookEvent::Iteration {
@@ -337,7 +340,12 @@ mod tests {
 
         let result = FfiToolBridge::new(Box::new(BadSchemaTool));
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Invalid JSON schema"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Invalid JSON schema")
+        );
     }
 
     #[tokio::test]
@@ -348,7 +356,10 @@ mod tests {
         ));
         let bridge = FfiToolBridge::new(tool).unwrap();
 
-        let result = bridge.execute(serde_json::json!({"a": 1, "b": 2})).await.unwrap();
+        let result = bridge
+            .execute(serde_json::json!({"a": 1, "b": 2}))
+            .await
+            .unwrap();
 
         assert!(!result.is_error);
         assert_eq!(result.content, "42");

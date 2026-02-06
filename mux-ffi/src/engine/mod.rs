@@ -10,14 +10,16 @@ mod subagent;
 mod tool_wrappers;
 mod workspace;
 
+use crate::MuxFfiError;
 use crate::bridge::FfiToolBridge;
 use crate::callback::{
     ChatCallback, CustomTool, HookHandler, LlmProvider, SubagentCallback, SubagentEventHandler,
 };
 use crate::callback_client::CallbackLlmClient;
 use crate::context::ModelContextConfig;
-use crate::types::{AgentConfig, ApprovalDecision, Conversation, Provider, TranscriptData, Workspace};
-use crate::MuxFfiError;
+use crate::types::{
+    AgentConfig, ApprovalDecision, Conversation, Provider, TranscriptData, Workspace,
+};
 use mux::agent::MemoryTranscriptStore;
 #[cfg(test)]
 use mux::prelude::{ContentBlock, Role};
@@ -40,7 +42,7 @@ struct ProviderConfig {
 }
 
 use mcp::McpClientHandle;
-use persistence::{StoredMessage, MESSAGES_DIR};
+use persistence::{MESSAGES_DIR, StoredMessage};
 
 #[derive(uniffi::Object)]
 pub struct MuxEngine {
@@ -58,8 +60,7 @@ pub struct MuxEngine {
     /// Connected MCP clients, keyed by workspace_id -> server_name -> handle
     mcp_clients: Arc<RwLock<HashMap<String, HashMap<String, McpClientHandle>>>>,
     /// Pending tool approval requests, keyed by tool_use_id -> oneshot sender
-    pending_approvals:
-        Arc<RwLock<HashMap<String, tokio::sync::oneshot::Sender<ApprovalDecision>>>>,
+    pending_approvals: Arc<RwLock<HashMap<String, tokio::sync::oneshot::Sender<ApprovalDecision>>>>,
     /// Built-in tools from mux (always available)
     builtin_tools: Vec<Arc<dyn Tool>>,
     /// Registered agent configurations
@@ -245,10 +246,7 @@ impl MuxEngine {
     }
 
     /// Register a custom tool from Swift
-    pub fn register_custom_tool(
-        &self,
-        tool: Box<dyn CustomTool>,
-    ) -> Result<(), MuxFfiError> {
+    pub fn register_custom_tool(&self, tool: Box<dyn CustomTool>) -> Result<(), MuxFfiError> {
         let bridge = FfiToolBridge::new(tool).map_err(|e| MuxFfiError::Engine {
             message: e.to_string(),
         })?;
@@ -350,8 +348,7 @@ impl MuxEngine {
             let rt = match Runtime::new() {
                 Ok(rt) => rt,
                 Err(e) => {
-                    callback
-                        .on_error(agent_id.clone(), format!("Failed to create runtime: {}", e));
+                    callback.on_error(agent_id.clone(), format!("Failed to create runtime: {}", e));
                     return;
                 }
             };
@@ -389,11 +386,7 @@ impl MuxEngine {
     }
 
     /// Set LLM config for a workspace (for testing context management).
-    pub(crate) fn set_workspace_llm_config(
-        &self,
-        workspace_id: &str,
-        model: &str,
-    ) {
+    pub(crate) fn set_workspace_llm_config(&self, workspace_id: &str, model: &str) {
         let mut workspaces = self.workspaces.write();
         if let Some(ws) = workspaces.get_mut(workspace_id) {
             ws.llm_config = Some(crate::types::LlmConfig {

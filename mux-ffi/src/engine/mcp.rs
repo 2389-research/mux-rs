@@ -1,14 +1,14 @@
 // ABOUTME: MCP (Model Context Protocol) server management for MuxEngine.
 // ABOUTME: Handles connection, disconnection, and tool execution for MCP servers.
 
-use super::helpers;
 use super::MuxEngine;
+use super::helpers;
+use crate::MuxFfiError;
 use crate::types::{
     ApprovalDecision, McpPromptArgument, McpPromptInfo, McpPromptMessage, McpPromptResult,
     McpResourceContent, McpResourceInfo, McpResourceTemplate, McpServerConfig, McpTransportType,
     PromptArgumentValue,
 };
-use crate::MuxFfiError;
 use mux::mcp::{
     McpPromptContent, McpPromptInfo as MuxMcpPromptInfo,
     McpResourceContent as MuxMcpResourceContent, McpResourceInfo as MuxMcpResourceInfo,
@@ -42,11 +42,11 @@ impl MuxEngine {
         config: McpServerConfig,
     ) -> Result<(), MuxFfiError> {
         let mut workspaces = self.workspaces.write();
-        let workspace = workspaces.get_mut(&workspace_id).ok_or_else(|| {
-            MuxFfiError::Engine {
+        let workspace = workspaces
+            .get_mut(&workspace_id)
+            .ok_or_else(|| MuxFfiError::Engine {
                 message: format!("Workspace not found: {}", workspace_id),
-            }
-        })?;
+            })?;
 
         // Check if server with same name already exists
         if workspace.mcp_servers.iter().any(|s| s.name == config.name) {
@@ -68,11 +68,11 @@ impl MuxEngine {
         server_name: String,
     ) -> Result<(), MuxFfiError> {
         let mut workspaces = self.workspaces.write();
-        let workspace = workspaces.get_mut(&workspace_id).ok_or_else(|| {
-            MuxFfiError::Engine {
+        let workspace = workspaces
+            .get_mut(&workspace_id)
+            .ok_or_else(|| MuxFfiError::Engine {
                 message: format!("Workspace not found: {}", workspace_id),
-            }
-        })?;
+            })?;
 
         let original_len = workspace.mcp_servers.len();
         workspace.mcp_servers.retain(|s| s.name != server_name);
@@ -103,11 +103,11 @@ impl MuxEngine {
         config: McpServerConfig,
     ) -> Result<(), MuxFfiError> {
         let mut workspaces = self.workspaces.write();
-        let workspace = workspaces.get_mut(&workspace_id).ok_or_else(|| {
-            MuxFfiError::Engine {
+        let workspace = workspaces
+            .get_mut(&workspace_id)
+            .ok_or_else(|| MuxFfiError::Engine {
                 message: format!("Workspace not found: {}", workspace_id),
-            }
-        })?;
+            })?;
 
         // Find and update the server
         let server = workspace
@@ -162,7 +162,10 @@ impl MuxEngine {
             let rt = match Runtime::new() {
                 Ok(rt) => rt,
                 Err(e) => {
-                    eprintln!("Failed to create async runtime for MCP disconnection: {}", e);
+                    eprintln!(
+                        "Failed to create async runtime for MCP disconnection: {}",
+                        e
+                    );
                     return;
                 }
             };
@@ -203,13 +206,16 @@ impl MuxEngine {
         workspace_clients
             .values()
             .flat_map(|handle| {
-                handle.resource_templates.iter().map(|t| McpResourceTemplate {
-                    uri_template: t.uri_template.clone(),
-                    name: t.name.clone(),
-                    description: t.description.clone(),
-                    mime_type: t.mime_type.clone(),
-                    server_name: handle.server_name.clone(),
-                })
+                handle
+                    .resource_templates
+                    .iter()
+                    .map(|t| McpResourceTemplate {
+                        uri_template: t.uri_template.clone(),
+                        name: t.name.clone(),
+                        description: t.description.clone(),
+                        mime_type: t.mime_type.clone(),
+                        server_name: handle.server_name.clone(),
+                    })
             })
             .collect()
     }
@@ -276,30 +282,44 @@ impl MuxEngine {
 
             rt.block_on(async move {
                 let locked = client.lock().await;
-                let contents = locked.read_resource(&uri).await.map_err(|e| MuxFfiError::Engine {
-                    message: e.to_string(),
-                })?;
+                let contents =
+                    locked
+                        .read_resource(&uri)
+                        .await
+                        .map_err(|e| MuxFfiError::Engine {
+                            message: e.to_string(),
+                        })?;
 
                 // Convert mux types to FFI types
                 Ok(contents
                     .into_iter()
                     .map(|c| match c {
-                        MuxMcpResourceContent::Text { uri, mime_type, text } => {
-                            McpResourceContent::Text { uri, mime_type, text }
-                        }
-                        MuxMcpResourceContent::Blob { uri, mime_type, blob } => {
-                            McpResourceContent::Blob { uri, mime_type, blob }
-                        }
+                        MuxMcpResourceContent::Text {
+                            uri,
+                            mime_type,
+                            text,
+                        } => McpResourceContent::Text {
+                            uri,
+                            mime_type,
+                            text,
+                        },
+                        MuxMcpResourceContent::Blob {
+                            uri,
+                            mime_type,
+                            blob,
+                        } => McpResourceContent::Blob {
+                            uri,
+                            mime_type,
+                            blob,
+                        },
                     })
                     .collect())
             })
         });
 
-        handle
-            .join()
-            .map_err(|e| MuxFfiError::Engine {
-                message: format!("Thread panicked: {:?}", e),
-            })?
+        handle.join().map_err(|e| MuxFfiError::Engine {
+            message: format!("Thread panicked: {:?}", e),
+        })?
     }
 
     /// Get an MCP prompt from a specific server with the given arguments.
@@ -342,12 +362,13 @@ impl MuxEngine {
 
             rt.block_on(async move {
                 let locked = client.lock().await;
-                let result = locked
-                    .get_prompt(&name, args_map)
-                    .await
-                    .map_err(|e| MuxFfiError::Engine {
-                        message: e.to_string(),
-                    })?;
+                let result =
+                    locked
+                        .get_prompt(&name, args_map)
+                        .await
+                        .map_err(|e| MuxFfiError::Engine {
+                            message: e.to_string(),
+                        })?;
 
                 // Convert to FFI type - simplify content to text only for v1
                 Ok(McpPromptResult {
@@ -362,14 +383,12 @@ impl MuxEngine {
                                 McpPromptContent::Image { data, mime_type } => {
                                     format!("[Image: {} bytes, type: {}]", data.len(), mime_type)
                                 }
-                                McpPromptContent::Resource { resource } => {
-                                    match resource {
-                                        MuxMcpResourceContent::Text { text, .. } => text,
-                                        MuxMcpResourceContent::Blob { blob, .. } => {
-                                            format!("[Binary data: {} bytes]", blob.len())
-                                        }
+                                McpPromptContent::Resource { resource } => match resource {
+                                    MuxMcpResourceContent::Text { text, .. } => text,
+                                    MuxMcpResourceContent::Blob { blob, .. } => {
+                                        format!("[Binary data: {} bytes]", blob.len())
                                     }
-                                }
+                                },
                             },
                         })
                         .collect(),
@@ -377,11 +396,9 @@ impl MuxEngine {
             })
         });
 
-        handle
-            .join()
-            .map_err(|e| MuxFfiError::Engine {
-                message: format!("Thread panicked: {:?}", e),
-            })?
+        handle.join().map_err(|e| MuxFfiError::Engine {
+            message: format!("Thread panicked: {:?}", e),
+        })?
     }
 }
 
@@ -739,7 +756,9 @@ mod tests {
     #[test]
     fn test_add_mcp_server() {
         let engine = create_test_engine();
-        let ws = engine.create_workspace("MCP Test".to_string(), None).unwrap();
+        let ws = engine
+            .create_workspace("MCP Test".to_string(), None)
+            .unwrap();
 
         let config = create_stdio_config("test-server");
         engine.add_mcp_server(ws.id.clone(), config).unwrap();
@@ -754,7 +773,9 @@ mod tests {
     #[test]
     fn test_add_mcp_server_duplicate_name() {
         let engine = create_test_engine();
-        let ws = engine.create_workspace("MCP Dup Test".to_string(), None).unwrap();
+        let ws = engine
+            .create_workspace("MCP Dup Test".to_string(), None)
+            .unwrap();
 
         let config1 = create_stdio_config("dup-server");
         engine.add_mcp_server(ws.id.clone(), config1).unwrap();
@@ -773,19 +794,28 @@ mod tests {
         let config = create_stdio_config("orphan-server");
         let result = engine.add_mcp_server("nonexistent-ws".to_string(), config);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Workspace not found"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Workspace not found")
+        );
     }
 
     #[test]
     fn test_remove_mcp_server() {
         let engine = create_test_engine();
-        let ws = engine.create_workspace("MCP Remove Test".to_string(), None).unwrap();
+        let ws = engine
+            .create_workspace("MCP Remove Test".to_string(), None)
+            .unwrap();
 
         let config = create_stdio_config("to-remove");
         engine.add_mcp_server(ws.id.clone(), config).unwrap();
         assert_eq!(engine.list_mcp_servers(ws.id.clone()).len(), 1);
 
-        engine.remove_mcp_server(ws.id.clone(), "to-remove".to_string()).unwrap();
+        engine
+            .remove_mcp_server(ws.id.clone(), "to-remove".to_string())
+            .unwrap();
         assert_eq!(engine.list_mcp_servers(ws.id.clone()).len(), 0);
 
         engine.delete_workspace(ws.id).unwrap();
@@ -794,11 +824,18 @@ mod tests {
     #[test]
     fn test_remove_mcp_server_not_found() {
         let engine = create_test_engine();
-        let ws = engine.create_workspace("MCP Remove NF".to_string(), None).unwrap();
+        let ws = engine
+            .create_workspace("MCP Remove NF".to_string(), None)
+            .unwrap();
 
         let result = engine.remove_mcp_server(ws.id.clone(), "ghost".to_string());
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("not found in workspace"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("not found in workspace")
+        );
 
         engine.delete_workspace(ws.id).unwrap();
     }
@@ -808,13 +845,20 @@ mod tests {
         let engine = create_test_engine();
         let result = engine.remove_mcp_server("fake-ws".to_string(), "any".to_string());
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Workspace not found"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Workspace not found")
+        );
     }
 
     #[test]
     fn test_list_mcp_servers_empty() {
         let engine = create_test_engine();
-        let ws = engine.create_workspace("MCP Empty".to_string(), None).unwrap();
+        let ws = engine
+            .create_workspace("MCP Empty".to_string(), None)
+            .unwrap();
 
         let servers = engine.list_mcp_servers(ws.id.clone());
         assert!(servers.is_empty());
@@ -832,11 +876,19 @@ mod tests {
     #[test]
     fn test_list_mcp_servers_multiple() {
         let engine = create_test_engine();
-        let ws = engine.create_workspace("MCP Multi".to_string(), None).unwrap();
+        let ws = engine
+            .create_workspace("MCP Multi".to_string(), None)
+            .unwrap();
 
-        engine.add_mcp_server(ws.id.clone(), create_stdio_config("server-a")).unwrap();
-        engine.add_mcp_server(ws.id.clone(), create_sse_config("server-b")).unwrap();
-        engine.add_mcp_server(ws.id.clone(), create_stdio_config("server-c")).unwrap();
+        engine
+            .add_mcp_server(ws.id.clone(), create_stdio_config("server-a"))
+            .unwrap();
+        engine
+            .add_mcp_server(ws.id.clone(), create_sse_config("server-b"))
+            .unwrap();
+        engine
+            .add_mcp_server(ws.id.clone(), create_stdio_config("server-c"))
+            .unwrap();
 
         let servers = engine.list_mcp_servers(ws.id.clone());
         assert_eq!(servers.len(), 3);
@@ -847,7 +899,9 @@ mod tests {
     #[test]
     fn test_update_mcp_server() {
         let engine = create_test_engine();
-        let ws = engine.create_workspace("MCP Update".to_string(), None).unwrap();
+        let ws = engine
+            .create_workspace("MCP Update".to_string(), None)
+            .unwrap();
 
         let config = create_stdio_config("updatable");
         engine.add_mcp_server(ws.id.clone(), config).unwrap();
@@ -875,12 +929,19 @@ mod tests {
     #[test]
     fn test_update_mcp_server_not_found() {
         let engine = create_test_engine();
-        let ws = engine.create_workspace("MCP Update NF".to_string(), None).unwrap();
+        let ws = engine
+            .create_workspace("MCP Update NF".to_string(), None)
+            .unwrap();
 
         let config = create_stdio_config("ghost-update");
         let result = engine.update_mcp_server(ws.id.clone(), config);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("not found in workspace"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("not found in workspace")
+        );
 
         engine.delete_workspace(ws.id).unwrap();
     }
@@ -891,7 +952,12 @@ mod tests {
         let config = create_stdio_config("any");
         let result = engine.update_mcp_server("fake-ws".to_string(), config);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Workspace not found"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Workspace not found")
+        );
     }
 
     #[test]
@@ -900,7 +966,10 @@ mod tests {
         let (tx, rx) = tokio::sync::oneshot::channel();
 
         // Insert a pending approval
-        engine.pending_approvals.write().insert("test-tool-use-id".to_string(), tx);
+        engine
+            .pending_approvals
+            .write()
+            .insert("test-tool-use-id".to_string(), tx);
 
         // Respond to it
         engine.respond_to_tool_approval("test-tool-use-id".to_string(), ApprovalDecision::Allow);
@@ -916,7 +985,10 @@ mod tests {
         let engine = create_test_engine();
         let (tx, rx) = tokio::sync::oneshot::channel();
 
-        engine.pending_approvals.write().insert("deny-id".to_string(), tx);
+        engine
+            .pending_approvals
+            .write()
+            .insert("deny-id".to_string(), tx);
         engine.respond_to_tool_approval("deny-id".to_string(), ApprovalDecision::Deny);
 
         let rt = tokio::runtime::Runtime::new().unwrap();
@@ -934,7 +1006,9 @@ mod tests {
     #[test]
     fn test_get_workspace_tools_builtin_only() {
         let engine = create_test_engine();
-        let ws = engine.create_workspace("Tools Test".to_string(), None).unwrap();
+        let ws = engine
+            .create_workspace("Tools Test".to_string(), None)
+            .unwrap();
 
         let tools = engine.get_workspace_tools(&ws.id);
 
@@ -953,7 +1027,9 @@ mod tests {
     #[test]
     fn test_get_workspace_tools_no_task_tool_without_handler() {
         let engine = create_test_engine();
-        let ws = engine.create_workspace("No Task".to_string(), None).unwrap();
+        let ws = engine
+            .create_workspace("No Task".to_string(), None)
+            .unwrap();
 
         let tools = engine.get_workspace_tools(&ws.id);
         let tool_names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
@@ -979,7 +1055,9 @@ mod tests {
         }
 
         let engine = create_test_engine();
-        let ws = engine.create_workspace("With Task".to_string(), None).unwrap();
+        let ws = engine
+            .create_workspace("With Task".to_string(), None)
+            .unwrap();
 
         engine.set_subagent_event_handler(Box::new(DummyHandler));
 
@@ -1052,10 +1130,7 @@ mod tests {
             "file:///test.txt".to_string(),
         );
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("not connected"));
+        assert!(result.unwrap_err().to_string().contains("not connected"));
 
         engine.delete_workspace(ws.id).unwrap();
     }
@@ -1073,10 +1148,12 @@ mod tests {
             "".to_string(), // Empty URI
         );
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("URI cannot be empty"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("URI cannot be empty")
+        );
 
         engine.delete_workspace(ws.id).unwrap();
     }
@@ -1119,10 +1196,7 @@ mod tests {
             vec![],
         );
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("not connected"));
+        assert!(result.unwrap_err().to_string().contains("not connected"));
 
         engine.delete_workspace(ws.id).unwrap();
     }

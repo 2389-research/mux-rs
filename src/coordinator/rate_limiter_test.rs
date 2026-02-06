@@ -10,7 +10,11 @@ async fn test_new_limiter_starts_full() {
     let limiter = RateLimiter::new(10.0, 1.0);
     let available = limiter.available().await;
     // Allow small floating point variance
-    assert!((available - 10.0).abs() < 0.1, "Expected ~10 tokens, got {}", available);
+    assert!(
+        (available - 10.0).abs() < 0.1,
+        "Expected ~10 tokens, got {}",
+        available
+    );
 }
 
 #[tokio::test]
@@ -24,10 +28,18 @@ async fn test_take_immediate_when_tokens_available() {
 
     assert!(result.is_ok());
     // Should be nearly instant
-    assert!(elapsed < Duration::from_millis(50), "Take should be instant, took {:?}", elapsed);
+    assert!(
+        elapsed < Duration::from_millis(50),
+        "Take should be instant, took {:?}",
+        elapsed
+    );
 
     let available = limiter.available().await;
-    assert!((available - 5.0).abs() < 0.1, "Expected ~5 tokens remaining, got {}", available);
+    assert!(
+        (available - 5.0).abs() < 0.1,
+        "Expected ~5 tokens remaining, got {}",
+        available
+    );
 }
 
 #[tokio::test]
@@ -36,7 +48,10 @@ async fn test_take_waits_when_insufficient_tokens() {
     let never_cancel = std::future::pending::<()>();
 
     // Take the initial token
-    limiter.take(1.0, std::future::pending::<()>()).await.unwrap();
+    limiter
+        .take(1.0, std::future::pending::<()>())
+        .await
+        .unwrap();
 
     // Now taking 0.5 tokens should wait ~50ms (0.5 tokens / 10 tokens per second)
     let start = Instant::now();
@@ -45,8 +60,16 @@ async fn test_take_waits_when_insufficient_tokens() {
 
     assert!(result.is_ok());
     // Should wait at least 10ms (minimum wait), but less than 200ms
-    assert!(elapsed >= Duration::from_millis(10), "Should wait at least 10ms, waited {:?}", elapsed);
-    assert!(elapsed < Duration::from_millis(200), "Should not wait too long, waited {:?}", elapsed);
+    assert!(
+        elapsed >= Duration::from_millis(10),
+        "Should wait at least 10ms, waited {:?}",
+        elapsed
+    );
+    assert!(
+        elapsed < Duration::from_millis(200),
+        "Should not wait too long, waited {:?}",
+        elapsed
+    );
 }
 
 #[tokio::test]
@@ -54,7 +77,10 @@ async fn test_take_cancelled() {
     let limiter = RateLimiter::new(1.0, 0.1); // Very slow refill
 
     // Take the initial token
-    limiter.take(1.0, std::future::pending::<()>()).await.unwrap();
+    limiter
+        .take(1.0, std::future::pending::<()>())
+        .await
+        .unwrap();
 
     // Try to take another token but cancel quickly
     let cancel = async {
@@ -74,7 +100,11 @@ async fn test_refill_caps_at_capacity() {
 
     let available = limiter.available().await;
     // Should be capped at capacity (5.0)
-    assert!((available - 5.0).abs() < 0.1, "Expected ~5 tokens (capacity), got {}", available);
+    assert!(
+        (available - 5.0).abs() < 0.1,
+        "Expected ~5 tokens (capacity), got {}",
+        available
+    );
 }
 
 #[tokio::test]
@@ -83,7 +113,10 @@ async fn test_multiple_takes_drain_bucket() {
 
     // Take tokens multiple times
     for _ in 0..5 {
-        limiter.take(2.0, std::future::pending::<()>()).await.unwrap();
+        limiter
+            .take(2.0, std::future::pending::<()>())
+            .await
+            .unwrap();
     }
 
     let available = limiter.available().await;
@@ -98,18 +131,32 @@ async fn test_burst_then_throttle() {
     // Burst: take all 3 tokens instantly
     let start = Instant::now();
     for _ in 0..3 {
-        limiter.take(1.0, std::future::pending::<()>()).await.unwrap();
+        limiter
+            .take(1.0, std::future::pending::<()>())
+            .await
+            .unwrap();
     }
     let burst_time = start.elapsed();
-    assert!(burst_time < Duration::from_millis(50), "Burst should be fast, took {:?}", burst_time);
+    assert!(
+        burst_time < Duration::from_millis(50),
+        "Burst should be fast, took {:?}",
+        burst_time
+    );
 
     // Now we should be throttled
     let throttle_start = Instant::now();
-    limiter.take(1.0, std::future::pending::<()>()).await.unwrap();
+    limiter
+        .take(1.0, std::future::pending::<()>())
+        .await
+        .unwrap();
     let throttle_time = throttle_start.elapsed();
 
     // Should wait at least 10ms (minimum wait)
-    assert!(throttle_time >= Duration::from_millis(10), "Should be throttled, waited {:?}", throttle_time);
+    assert!(
+        throttle_time >= Duration::from_millis(10),
+        "Should be throttled, waited {:?}",
+        throttle_time
+    );
 }
 
 #[tokio::test]
@@ -120,11 +167,17 @@ async fn test_minimum_wait_time_enforced() {
     let limiter = RateLimiter::new(0.5, 100.0);
 
     // Drain the bucket completely
-    limiter.take(0.5, std::future::pending::<()>()).await.unwrap();
+    limiter
+        .take(0.5, std::future::pending::<()>())
+        .await
+        .unwrap();
 
     // Now we need 0.5 tokens. Calculated wait = 5ms, but minimum is 10ms.
     let start = Instant::now();
-    limiter.take(0.5, std::future::pending::<()>()).await.unwrap();
+    limiter
+        .take(0.5, std::future::pending::<()>())
+        .await
+        .unwrap();
     let elapsed = start.elapsed();
 
     // Should wait at least 10ms even though calculated wait is only 5ms

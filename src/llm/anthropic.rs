@@ -303,10 +303,13 @@ fn parse_sse_event(event_str: &str) -> Option<StreamEvent> {
             block: ContentBlock::from(content_block),
         }),
         AnthropicStreamEvent::ContentBlockDelta { index, delta } => match delta {
-            AnthropicDelta::TextDelta { text } => Some(StreamEvent::ContentBlockDelta { index, text }),
-            AnthropicDelta::InputJsonDelta { partial_json } => {
-                Some(StreamEvent::InputJsonDelta { index, partial_json })
+            AnthropicDelta::TextDelta { text } => {
+                Some(StreamEvent::ContentBlockDelta { index, text })
             }
+            AnthropicDelta::InputJsonDelta { partial_json } => Some(StreamEvent::InputJsonDelta {
+                index,
+                partial_json,
+            }),
         },
         AnthropicStreamEvent::ContentBlockStop { index } => {
             Some(StreamEvent::ContentBlockStop { index })

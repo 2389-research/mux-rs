@@ -2,7 +2,7 @@
 // ABOUTME: Connects to Ollama server (default localhost:11434) with dummy API key.
 
 use super::client::StreamEvent;
-use super::openai::{parse_sse_line, OpenAIError, OpenAIRequest, OpenAIResponse};
+use super::openai::{OpenAIError, OpenAIRequest, OpenAIResponse, parse_sse_line};
 use super::{ContentBlock, Request, Response, StopReason, Usage};
 use crate::error::LlmError;
 use async_trait::async_trait;

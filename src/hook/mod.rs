@@ -1,8 +1,8 @@
 // ABOUTME: Hook system for extensibility in tool and agent lifecycle.
 // ABOUTME: Provides events, actions, and a registry for hook management.
 
-use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 use async_trait::async_trait;
 use serde_json::Value;
@@ -15,10 +15,7 @@ use crate::tool::ToolResult;
 #[derive(Debug, Clone)]
 pub enum HookEvent {
     /// Fired before a tool is executed.
-    PreToolUse {
-        tool_name: String,
-        input: Value,
-    },
+    PreToolUse { tool_name: String, input: Value },
 
     /// Fired after a tool execution completes.
     PostToolUse {
@@ -29,10 +26,7 @@ pub enum HookEvent {
     },
 
     /// Fired when an agent starts execution.
-    AgentStart {
-        agent_id: String,
-        task: String,
-    },
+    AgentStart { agent_id: String, task: String },
 
     /// Fired when an agent completes execution.
     AgentStop {
@@ -41,10 +35,7 @@ pub enum HookEvent {
     },
 
     /// Fired at the start of each think-act iteration.
-    Iteration {
-        agent_id: String,
-        iteration: usize,
-    },
+    Iteration { agent_id: String, iteration: usize },
 
     /// Fired when a session starts (via run() or continue()).
     SessionStart {
@@ -484,10 +475,7 @@ mod tests {
         async fn on_event(&self, event: &HookEvent) -> Result<HookAction, anyhow::Error> {
             if let HookEvent::PreToolUse { tool_name, .. } = event {
                 if tool_name == &self.block_tool {
-                    return Ok(HookAction::Block(format!(
-                        "Tool {} is blocked",
-                        tool_name
-                    )));
+                    return Ok(HookAction::Block(format!("Tool {} is blocked", tool_name)));
                 }
             }
             Ok(HookAction::Continue)

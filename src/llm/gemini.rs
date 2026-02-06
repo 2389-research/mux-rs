@@ -187,7 +187,8 @@ impl GeminiClient {
             .or_else(|_| std::env::var("GOOGLE_API_KEY"))
             .map_err(|_| LlmError::Api {
                 status: 0,
-                message: "GEMINI_API_KEY or GOOGLE_API_KEY environment variable not set".to_string(),
+                message: "GEMINI_API_KEY or GOOGLE_API_KEY environment variable not set"
+                    .to_string(),
             })?;
         Ok(Self::new(api_key))
     }
@@ -298,7 +299,11 @@ impl From<&Request> for GeminiRequest {
             Vec::new()
         } else {
             vec![GeminiTool {
-                function_declarations: req.tools.iter().map(GeminiFunctionDeclaration::from).collect(),
+                function_declarations: req
+                    .tools
+                    .iter()
+                    .map(GeminiFunctionDeclaration::from)
+                    .collect(),
             }]
         };
 
@@ -321,10 +326,15 @@ fn parse_stop_reason(s: Option<&str>) -> StopReason {
 }
 
 fn convert_gemini_response(resp: GeminiResponse, model: String) -> Result<Response, LlmError> {
-    let candidate = resp.candidates.into_iter().next().ok_or_else(|| LlmError::Api {
-        status: 0,
-        message: "Gemini returned empty candidates (possibly blocked by safety filters)".to_string(),
-    })?;
+    let candidate = resp
+        .candidates
+        .into_iter()
+        .next()
+        .ok_or_else(|| LlmError::Api {
+            status: 0,
+            message: "Gemini returned empty candidates (possibly blocked by safety filters)"
+                .to_string(),
+        })?;
 
     let blocks: Vec<ContentBlock> = candidate
         .content
@@ -377,7 +387,11 @@ fn parse_gemini_sse(line: &str) -> Option<GeminiResponse> {
 impl super::client::LlmClient for GeminiClient {
     async fn create_message(&self, req: &Request) -> Result<Response, LlmError> {
         let gemini_req = GeminiRequest::from(req);
-        let url = format!("{}?key={}", self.endpoint(&req.model, "generateContent"), self.api_key);
+        let url = format!(
+            "{}?key={}",
+            self.endpoint(&req.model, "generateContent"),
+            self.api_key
+        );
 
         let response = self
             .http
