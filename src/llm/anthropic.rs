@@ -152,6 +152,7 @@ pub struct AnthropicMessageDeltaData {
 #[derive(Debug, Clone)]
 pub struct AnthropicClient {
     api_key: String,
+    base_url: String,
     http: reqwest::Client,
 }
 
@@ -160,8 +161,15 @@ impl AnthropicClient {
     pub fn new(api_key: impl Into<String>) -> Self {
         Self {
             api_key: api_key.into(),
+            base_url: ANTHROPIC_API_URL.to_string(),
             http: reqwest::Client::new(),
         }
+    }
+
+    /// Override the base URL for Anthropic-compatible APIs.
+    pub fn with_base_url(mut self, url: impl Into<String>) -> Self {
+        self.base_url = url.into();
+        self
     }
 
     /// Create a new Anthropic client from the ANTHROPIC_API_KEY environment variable.
@@ -338,7 +346,7 @@ impl super::client::LlmClient for AnthropicClient {
 
         let response = self
             .http
-            .post(ANTHROPIC_API_URL)
+            .post(&self.base_url)
             .header("x-api-key", &self.api_key)
             .header("anthropic-version", ANTHROPIC_VERSION)
             .header("content-type", "application/json")
@@ -367,11 +375,12 @@ impl super::client::LlmClient for AnthropicClient {
         anthropic_req.stream = Some(true);
 
         let api_key = self.api_key.clone();
+        let base_url = self.base_url.clone();
         let http = self.http.clone();
 
         Box::pin(async_stream::try_stream! {
             let response = http
-                .post(ANTHROPIC_API_URL)
+                .post(&base_url)
                 .header("x-api-key", &api_key)
                 .header("anthropic-version", ANTHROPIC_VERSION)
                 .header("content-type", "application/json")
