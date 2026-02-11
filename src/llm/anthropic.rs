@@ -9,7 +9,7 @@ use futures::Stream;
 use serde::{Deserialize, Serialize};
 use std::pin::Pin;
 
-const ANTHROPIC_API_URL: &str = "https://api.anthropic.com/v1/messages";
+const ANTHROPIC_DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 
 /// Anthropic API request format.
@@ -161,7 +161,7 @@ impl AnthropicClient {
     pub fn new(api_key: impl Into<String>) -> Self {
         Self {
             api_key: api_key.into(),
-            base_url: ANTHROPIC_API_URL.to_string(),
+            base_url: ANTHROPIC_DEFAULT_BASE_URL.to_string(),
             http: reqwest::Client::new(),
         }
     }
@@ -344,9 +344,10 @@ impl super::client::LlmClient for AnthropicClient {
     async fn create_message(&self, req: &Request) -> Result<Response, LlmError> {
         let anthropic_req = AnthropicRequest::from(req);
 
+        let url = format!("{}/v1/messages", self.base_url);
         let response = self
             .http
-            .post(&self.base_url)
+            .post(&url)
             .header("x-api-key", &self.api_key)
             .header("anthropic-version", ANTHROPIC_VERSION)
             .header("content-type", "application/json")
@@ -379,8 +380,9 @@ impl super::client::LlmClient for AnthropicClient {
         let http = self.http.clone();
 
         Box::pin(async_stream::try_stream! {
+            let url = format!("{}/v1/messages", base_url);
             let response = http
-                .post(&base_url)
+                .post(&url)
                 .header("x-api-key", &api_key)
                 .header("anthropic-version", ANTHROPIC_VERSION)
                 .header("content-type", "application/json")
