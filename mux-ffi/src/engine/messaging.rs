@@ -559,8 +559,15 @@ mod tests {
     use crate::types::AgentConfig;
     use std::sync::atomic::{AtomicBool, Ordering};
 
+    fn test_dir(name: &str) -> String {
+        std::env::temp_dir()
+            .join(name)
+            .to_string_lossy()
+            .to_string()
+    }
+
     fn create_test_engine() -> Arc<MuxEngine> {
-        MuxEngine::new("/tmp/mux-test-messaging".to_string()).unwrap()
+        MuxEngine::new(test_dir("mux-test-messaging")).unwrap()
     }
 
     // Mock callback that tracks calls

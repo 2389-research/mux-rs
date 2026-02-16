@@ -45,7 +45,10 @@ impl Tool for ListFilesTool {
 
         let base_path = params.path.unwrap_or_else(|| ".".to_string());
         let glob_pattern = params.glob.unwrap_or_else(|| "*".to_string());
-        let full_pattern = format!("{}/{}", base_path, glob_pattern);
+        let full_pattern = std::path::Path::new(&base_path)
+            .join(&glob_pattern)
+            .to_string_lossy()
+            .to_string();
 
         let mut files = Vec::new();
         for entry in glob::glob(&full_pattern).unwrap_or_else(|_| glob::glob("").unwrap()) {

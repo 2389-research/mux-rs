@@ -53,6 +53,14 @@ mod tests {
     use crate::context::{CompactionMode, ModelContextConfig};
     use crate::types::AgentConfig;
 
+    /// Create a cross-platform temp directory path for tests.
+    fn test_dir(name: &str) -> String {
+        std::env::temp_dir()
+            .join(name)
+            .to_string_lossy()
+            .to_string()
+    }
+
     #[test]
     fn test_version() {
         assert!(!version().is_empty());
@@ -74,13 +82,13 @@ mod tests {
 
     #[test]
     fn test_engine_creation() {
-        let engine = MuxEngine::new("/tmp/mux-test".to_string()).unwrap();
+        let engine = MuxEngine::new(test_dir("mux-test")).unwrap();
         assert!(engine.list_workspaces().is_empty());
     }
 
     #[test]
     fn test_workspace_crud() {
-        let engine = MuxEngine::new("/tmp/mux-test-crud".to_string()).unwrap();
+        let engine = MuxEngine::new(test_dir("mux-test-crud")).unwrap();
 
         // Create
         let ws = engine
@@ -99,7 +107,7 @@ mod tests {
 
     #[test]
     fn test_system_prompt() {
-        let engine = MuxEngine::new("/tmp/mux-test-prompt".to_string()).unwrap();
+        let engine = MuxEngine::new(test_dir("mux-test-prompt")).unwrap();
         let ws = engine
             .create_workspace("Prompt Test".to_string(), None)
             .unwrap();
@@ -129,7 +137,7 @@ mod tests {
 
     #[test]
     fn test_agent_registration() {
-        let engine = MuxEngine::new("/tmp/mux-test-agents".to_string()).unwrap();
+        let engine = MuxEngine::new(test_dir("mux-test-agents")).unwrap();
 
         // Register agent
         let config = AgentConfig::new(
@@ -149,7 +157,7 @@ mod tests {
 
     #[test]
     fn test_provider_config() {
-        let engine = MuxEngine::new("/tmp/mux-test-providers".to_string()).unwrap();
+        let engine = MuxEngine::new(test_dir("mux-test-providers")).unwrap();
 
         // Set provider config with default models
         engine.set_provider_config(
@@ -192,14 +200,14 @@ mod tests {
 
     #[test]
     fn test_unregister_nonexistent_agent() {
-        let engine = MuxEngine::new("/tmp/mux-test-unreg".to_string()).unwrap();
+        let engine = MuxEngine::new(test_dir("mux-test-unreg")).unwrap();
         let result = engine.unregister_agent("nonexistent".to_string());
         assert!(result.is_err());
     }
 
     #[test]
     fn test_model_context_config() {
-        let engine = MuxEngine::new("/tmp/mux-test-context".to_string()).unwrap();
+        let engine = MuxEngine::new(test_dir("mux-test-context")).unwrap();
 
         // Default config
         let default_config = engine.get_model_context_config("unknown-model".to_string());
@@ -223,7 +231,7 @@ mod tests {
 
     #[test]
     fn test_clear_context() {
-        let engine = MuxEngine::new("/tmp/mux-test-clear".to_string()).unwrap();
+        let engine = MuxEngine::new(test_dir("mux-test-clear")).unwrap();
         let ws = engine.create_workspace("Test".to_string(), None).unwrap();
         let conv = engine
             .create_conversation(ws.id.clone(), "Test Conv".to_string())
@@ -242,7 +250,7 @@ mod tests {
 
     #[test]
     fn test_context_workflow() {
-        let engine = MuxEngine::new("/tmp/mux-test-context-flow".to_string()).unwrap();
+        let engine = MuxEngine::new(test_dir("mux-test-context-flow")).unwrap();
 
         // Create workspace with model config
         let ws = engine
@@ -283,7 +291,7 @@ mod tests {
     fn test_context_usage_with_messages() {
         use mux::prelude::Role;
 
-        let engine = MuxEngine::new("/tmp/mux-test-ctx-msg".to_string()).unwrap();
+        let engine = MuxEngine::new(test_dir("mux-test-ctx-msg")).unwrap();
         let ws = engine.create_workspace("Test".to_string(), None).unwrap();
         let conv = engine
             .create_conversation(ws.id.clone(), "Test Conv".to_string())
@@ -310,7 +318,7 @@ mod tests {
     fn test_truncate_oldest_via_compact() {
         use mux::prelude::Role;
 
-        let engine = MuxEngine::new("/tmp/mux-test-truncate".to_string()).unwrap();
+        let engine = MuxEngine::new(test_dir("mux-test-truncate")).unwrap();
         let ws = engine
             .create_workspace("Truncate Test".to_string(), None)
             .unwrap();
@@ -362,7 +370,7 @@ mod tests {
 
     #[test]
     fn test_get_workspace_for_conversation() {
-        let engine = MuxEngine::new("/tmp/mux-test-ws-conv".to_string()).unwrap();
+        let engine = MuxEngine::new(test_dir("mux-test-ws-conv")).unwrap();
 
         let ws1 = engine
             .create_workspace("Workspace 1".to_string(), None)
@@ -406,7 +414,7 @@ mod tests {
         // Small context models (<=8K) should use truncation, not summarization
         use mux::prelude::Role;
 
-        let engine = MuxEngine::new("/tmp/mux-test-auto-small".to_string()).unwrap();
+        let engine = MuxEngine::new(test_dir("mux-test-auto-small")).unwrap();
         let ws = engine
             .create_workspace("Auto Small Test".to_string(), None)
             .unwrap();
@@ -455,7 +463,7 @@ mod tests {
         // Without an API key, this should fail with a clear error
         use mux::prelude::Role;
 
-        let engine = MuxEngine::new("/tmp/mux-test-auto-large".to_string()).unwrap();
+        let engine = MuxEngine::new(test_dir("mux-test-auto-large")).unwrap();
         let ws = engine
             .create_workspace("Auto Large Test".to_string(), None)
             .unwrap();
@@ -502,7 +510,7 @@ mod tests {
         use crate::context::SMALL_CONTEXT_THRESHOLD;
         use mux::prelude::Role;
 
-        let engine = MuxEngine::new("/tmp/mux-test-boundary".to_string()).unwrap();
+        let engine = MuxEngine::new(test_dir("mux-test-boundary")).unwrap();
         let ws = engine
             .create_workspace("Boundary Test".to_string(), None)
             .unwrap();
@@ -553,7 +561,7 @@ mod tests {
         // Edge case: target_tokens smaller than any single message
         use mux::prelude::Role;
 
-        let engine = MuxEngine::new("/tmp/mux-test-tiny".to_string()).unwrap();
+        let engine = MuxEngine::new(test_dir("mux-test-tiny")).unwrap();
         let ws = engine
             .create_workspace("Tiny Test".to_string(), None)
             .unwrap();
@@ -604,7 +612,7 @@ mod tests {
     #[test]
     fn test_compaction_on_empty_conversation() {
         // Edge case: compact an empty conversation
-        let engine = MuxEngine::new("/tmp/mux-test-empty".to_string()).unwrap();
+        let engine = MuxEngine::new(test_dir("mux-test-empty")).unwrap();
         let ws = engine
             .create_workspace("Empty Test".to_string(), None)
             .unwrap();

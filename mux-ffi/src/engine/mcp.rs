@@ -727,16 +727,31 @@ mod tests {
     use crate::engine::MuxEngine;
     use crate::types::McpServerConfig;
 
+    fn test_dir(name: &str) -> String {
+        std::env::temp_dir()
+            .join(name)
+            .to_string_lossy()
+            .to_string()
+    }
+
     fn create_test_engine() -> std::sync::Arc<MuxEngine> {
-        MuxEngine::new("/tmp/mux-test-mcp".to_string()).unwrap()
+        MuxEngine::new(test_dir("mux-test-mcp")).unwrap()
     }
 
     fn create_stdio_config(name: &str) -> McpServerConfig {
         McpServerConfig {
             name: name.to_string(),
             transport_type: McpTransportType::Stdio,
-            command: Some("/usr/bin/echo".to_string()),
-            args: vec!["hello".to_string()],
+            command: Some(if cfg!(target_os = "windows") {
+                "cmd.exe".to_string()
+            } else {
+                "/usr/bin/echo".to_string()
+            }),
+            args: if cfg!(target_os = "windows") {
+                vec!["/C".to_string(), "echo".to_string(), "hello".to_string()]
+            } else {
+                vec!["hello".to_string()]
+            },
             url: None,
             enabled: true,
         }
