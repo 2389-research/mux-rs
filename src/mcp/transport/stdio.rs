@@ -171,10 +171,28 @@ mod tests {
         }
     }
 
+    /// Returns the appropriate echo-back command for the current platform.
+    /// On Unix, `cat` reads stdin and echoes it back. On Windows, `findstr "^"` does the same.
+    fn echo_command() -> &'static str {
+        if cfg!(target_os = "windows") {
+            "findstr"
+        } else {
+            "cat"
+        }
+    }
+
+    fn echo_args() -> Vec<String> {
+        if cfg!(target_os = "windows") {
+            vec!["^".to_string()]
+        } else {
+            vec![]
+        }
+    }
+
     #[tokio::test]
     async fn test_connect_with_args() {
-        // Using 'cat' as a simple echo server - it exists on all Unix systems
-        let result = StdioTransport::connect("cat", &[], &HashMap::new()).await;
+        let result =
+            StdioTransport::connect(echo_command(), &echo_args(), &HashMap::new()).await;
 
         // Should succeed in spawning
         assert!(result.is_ok());
@@ -186,9 +204,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_shutdown_cleans_up() {
-        let transport = StdioTransport::connect("cat", &[], &HashMap::new())
-            .await
-            .unwrap();
+        let transport =
+            StdioTransport::connect(echo_command(), &echo_args(), &HashMap::new())
+                .await
+                .unwrap();
 
         // Shutdown should succeed
         let result = transport.shutdown().await;
