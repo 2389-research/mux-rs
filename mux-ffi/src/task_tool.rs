@@ -71,7 +71,9 @@ impl Hook for SubagentEventProxyHook {
             | HookEvent::Stop { .. }
             | HookEvent::SubagentStart { .. }
             | HookEvent::SubagentStop { .. }
-            | HookEvent::ResponseReceived { .. } => {
+            | HookEvent::ResponseReceived { .. }
+            | HookEvent::StreamDelta { .. }
+            | HookEvent::StreamUsage { .. } => {
                 // These are handled at the FfiTaskTool level or not relevant
             }
         }

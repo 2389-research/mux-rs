@@ -89,6 +89,16 @@ pub enum HookEvent {
         /// Tool uses in this response (name, id, input JSON).
         tool_uses: Vec<(String, String, Value)>,
     },
+
+    /// Fired for each text token during streaming.
+    StreamDelta { agent_id: String, text: String },
+
+    /// Fired when a MessageDelta event is received during streaming,
+    /// carrying token usage counts.
+    StreamUsage {
+        agent_id: String,
+        usage: crate::llm::Usage,
+    },
 }
 
 /// Actions a hook can return to control execution flow.
@@ -194,6 +204,8 @@ impl HookRegistry {
                             HookEvent::SubagentStart { .. } => "SubagentStart",
                             HookEvent::SubagentStop { .. } => "SubagentStop",
                             HookEvent::ResponseReceived { .. } => "ResponseReceived",
+                            HookEvent::StreamDelta { .. } => "StreamDelta",
+                            HookEvent::StreamUsage { .. } => "StreamUsage",
                         };
                         return Err(anyhow::anyhow!(
                             "HookAction::Transform is only valid for PreToolUse events, got {}",
@@ -459,6 +471,12 @@ mod tests {
                 HookEvent::SubagentStop { child_id, .. } => format!("subagent_stop:{}", child_id),
                 HookEvent::ResponseReceived { agent_id, .. } => {
                     format!("response:{}", agent_id)
+                }
+                HookEvent::StreamDelta { agent_id, text } => {
+                    format!("stream_delta:{}:{}", agent_id, text)
+                }
+                HookEvent::StreamUsage { agent_id, .. } => {
+                    format!("stream_usage:{}", agent_id)
                 }
             };
             self.events.write().await.push(msg);

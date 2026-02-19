@@ -34,6 +34,11 @@ pub struct AgentDefinition {
 
     /// Maximum iterations for the think-act loop.
     pub max_iterations: usize,
+
+    /// Whether to use streaming for LLM calls.
+    /// When true, the agent uses `create_message_stream()` and fires
+    /// `StreamDelta` / `StreamUsage` hooks for real-time token delivery.
+    pub streaming: bool,
 }
 
 impl AgentDefinition {
@@ -47,6 +52,7 @@ impl AgentDefinition {
             denied_tools: Vec::new(),
             fork_context: false,
             max_iterations: 10,
+            streaming: false,
         }
     }
 
@@ -77,6 +83,12 @@ impl AgentDefinition {
     /// Set maximum iterations.
     pub fn max_iterations(mut self, max: usize) -> Self {
         self.max_iterations = max;
+        self
+    }
+
+    /// Enable or disable streaming for LLM calls.
+    pub fn streaming(mut self, enabled: bool) -> Self {
+        self.streaming = enabled;
         self
     }
 }

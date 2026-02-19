@@ -7,6 +7,7 @@ mod gemini;
 mod ollama;
 mod openai;
 mod openrouter;
+pub mod stream_accumulator;
 mod types;
 
 pub use anthropic::*;

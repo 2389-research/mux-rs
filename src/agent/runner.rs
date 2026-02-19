@@ -7,9 +7,12 @@ use uuid::Uuid;
 
 use super::definition::AgentDefinition;
 use super::filter::FilteredRegistry;
+use futures::StreamExt;
+
 use crate::error::LlmError;
 use crate::hook::{HookAction, HookEvent, HookRegistry};
-use crate::llm::{ContentBlock, LlmClient, Message, Request, Role, Usage};
+use crate::llm::stream_accumulator::StreamAccumulator;
+use crate::llm::{ContentBlock, LlmClient, Message, Request, Response, Role, StreamEvent, Usage};
 use crate::permission::{ApprovalContext, ApprovalHandler};
 use crate::tool::Registry;
 
@@ -222,7 +225,7 @@ impl SubAgent {
                 .max_tokens(4096);
 
             // Call the LLM
-            let response = self.client.create_message(&request).await?;
+            let response = self.call_llm(&request).await?;
 
             // Aggregate usage
             self.usage.input_tokens += response.usage.input_tokens;
@@ -337,6 +340,71 @@ impl SubAgent {
         .await?;
 
         Ok(result)
+    }
+
+    /// Call the LLM, using streaming or non-streaming based on definition.
+    ///
+    /// When streaming is enabled, fires `StreamDelta` hooks for text tokens
+    /// and `StreamUsage` hooks for MessageDelta events, then assembles the
+    /// final `Response` from accumulated stream events.
+    async fn call_llm(&self, request: &Request) -> Result<Response, LlmError> {
+        if !self.definition.streaming {
+            return self.client.create_message(request).await;
+        }
+
+        // Streaming path
+        let mut stream = self.client.create_message_stream(request);
+        let mut accumulator = StreamAccumulator::new();
+        let mut message_id = String::new();
+        let mut model = String::new();
+        let mut stop_reason = None;
+        let mut usage = Usage::default();
+
+        while let Some(event_result) = stream.next().await {
+            let event = event_result?;
+
+            match &event {
+                StreamEvent::MessageStart {
+                    id: msg_id,
+                    model: msg_model,
+                } => {
+                    message_id = msg_id.clone();
+                    model = msg_model.clone();
+                }
+                StreamEvent::ContentBlockDelta { text, .. } if !accumulator.in_tool_use() => {
+                    // Fire StreamDelta hook for text tokens
+                    self.fire_hook(HookEvent::StreamDelta {
+                        agent_id: self.agent_id.clone(),
+                        text: text.clone(),
+                    })
+                    .await?;
+                }
+                StreamEvent::MessageDelta {
+                    stop_reason: sr,
+                    usage: delta_usage,
+                } => {
+                    stop_reason = *sr;
+                    usage = delta_usage.clone();
+                    // Fire StreamUsage hook
+                    self.fire_hook(HookEvent::StreamUsage {
+                        agent_id: self.agent_id.clone(),
+                        usage: delta_usage.clone(),
+                    })
+                    .await?;
+                }
+                _ => {}
+            }
+
+            accumulator.handle_event(&event);
+        }
+
+        Ok(Response {
+            id: message_id,
+            content: accumulator.into_content(),
+            stop_reason: stop_reason.unwrap_or(crate::llm::StopReason::EndTurn),
+            model,
+            usage,
+        })
     }
 
     /// Execute a tool and return the result.

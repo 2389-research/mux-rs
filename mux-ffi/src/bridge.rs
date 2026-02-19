@@ -71,7 +71,9 @@ impl Hook for FfiHookBridge {
             | HookEvent::Stop { .. }
             | HookEvent::SubagentStart { .. }
             | HookEvent::SubagentStop { .. }
-            | HookEvent::ResponseReceived { .. } => {
+            | HookEvent::ResponseReceived { .. }
+            | HookEvent::StreamDelta { .. }
+            | HookEvent::StreamUsage { .. } => {
                 return Ok(HookAction::Continue);
             }
         };
