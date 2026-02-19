@@ -74,6 +74,25 @@ impl Hook for SubagentEventProxyHook {
             | HookEvent::ResponseReceived { .. } => {
                 // These are handled at the FfiTaskTool level or not relevant
             }
+            HookEvent::StreamDelta { text, .. } => {
+                let text = text.clone();
+
+                tokio::task::spawn_blocking(move || {
+                    handler.on_stream_delta(agent_id, text);
+                })
+                .await
+                .ok();
+            }
+            HookEvent::StreamUsage { usage, .. } => {
+                let input_tokens = usage.input_tokens;
+                let output_tokens = usage.output_tokens;
+
+                tokio::task::spawn_blocking(move || {
+                    handler.on_stream_usage(agent_id, input_tokens, output_tokens);
+                })
+                .await
+                .ok();
+            }
         }
 
         Ok(HookAction::Continue)
@@ -429,6 +448,16 @@ mod tests {
 
         fn on_agent_error(&self, _subagent_id: String, _error: String) {
             self.error_count.fetch_add(1, Ordering::SeqCst);
+        }
+
+        fn on_stream_delta(&self, _subagent_id: String, _text: String) {}
+
+        fn on_stream_usage(
+            &self,
+            _subagent_id: String,
+            _input_tokens: u32,
+            _output_tokens: u32,
+        ) {
         }
     }
 

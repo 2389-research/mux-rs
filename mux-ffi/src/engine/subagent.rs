@@ -80,6 +80,18 @@ impl SubagentEventHandler for TaskToolEventProxy {
             handler.on_agent_error(subagent_id, error);
         }
     }
+
+    fn on_stream_delta(&self, subagent_id: String, text: String) {
+        if let Some(handler) = self.engine_handler.read().as_ref() {
+            handler.on_stream_delta(subagent_id, text);
+        }
+    }
+
+    fn on_stream_usage(&self, subagent_id: String, input_tokens: u32, output_tokens: u32) {
+        if let Some(handler) = self.engine_handler.read().as_ref() {
+            handler.on_stream_usage(subagent_id, input_tokens, output_tokens);
+        }
+    }
 }
 
 /// A hook that proxies tool events to the SubagentCallback.
@@ -403,6 +415,8 @@ mod tests {
         fn on_agent_error(&self, _: String, _: String) {
             self.error_count.fetch_add(1, Ordering::SeqCst);
         }
+        fn on_stream_delta(&self, _subagent_id: String, _text: String) {}
+        fn on_stream_usage(&self, _subagent_id: String, _input_tokens: u32, _output_tokens: u32) {}
     }
 
     #[test]
@@ -433,6 +447,8 @@ mod tests {
                 fn on_agent_error(&self, a: String, b: String) {
                     self.0.on_agent_error(a, b);
                 }
+                fn on_stream_delta(&self, _subagent_id: String, _text: String) {}
+                fn on_stream_usage(&self, _subagent_id: String, _input_tokens: u32, _output_tokens: u32) {}
             }
             ForwardToArc(handler.clone())
         }));
@@ -461,6 +477,8 @@ mod tests {
             fn on_iteration(&self, _: String, _: u32) {}
             fn on_agent_completed(&self, _: String, _: String, _: u32, _: u32, _: bool) {}
             fn on_agent_error(&self, _: String, _: String) {}
+            fn on_stream_delta(&self, _subagent_id: String, _text: String) {}
+            fn on_stream_usage(&self, _subagent_id: String, _input_tokens: u32, _output_tokens: u32) {}
         }
         *engine_handler.write() = Some(Box::new(ForwardToArc(handler.clone())));
 
@@ -488,6 +506,8 @@ mod tests {
             fn on_iteration(&self, _: String, _: u32) {}
             fn on_agent_completed(&self, _: String, _: String, _: u32, _: u32, _: bool) {}
             fn on_agent_error(&self, _: String, _: String) {}
+            fn on_stream_delta(&self, _subagent_id: String, _text: String) {}
+            fn on_stream_usage(&self, _subagent_id: String, _input_tokens: u32, _output_tokens: u32) {}
         }
         *engine_handler.write() = Some(Box::new(ForwardToArc(handler.clone())));
 
@@ -515,6 +535,8 @@ mod tests {
             }
             fn on_agent_completed(&self, _: String, _: String, _: u32, _: u32, _: bool) {}
             fn on_agent_error(&self, _: String, _: String) {}
+            fn on_stream_delta(&self, _subagent_id: String, _text: String) {}
+            fn on_stream_usage(&self, _subagent_id: String, _input_tokens: u32, _output_tokens: u32) {}
         }
         *engine_handler.write() = Some(Box::new(ForwardToArc(handler.clone())));
 
@@ -542,6 +564,8 @@ mod tests {
                 self.0.on_agent_completed(a, b, c, d, e);
             }
             fn on_agent_error(&self, _: String, _: String) {}
+            fn on_stream_delta(&self, _subagent_id: String, _text: String) {}
+            fn on_stream_usage(&self, _subagent_id: String, _input_tokens: u32, _output_tokens: u32) {}
         }
         *engine_handler.write() = Some(Box::new(ForwardToArc(handler.clone())));
 
@@ -569,6 +593,8 @@ mod tests {
             fn on_agent_error(&self, a: String, b: String) {
                 self.0.on_agent_error(a, b);
             }
+            fn on_stream_delta(&self, _: String, _: String) {}
+            fn on_stream_usage(&self, _: String, _: u32, _: u32) {}
         }
         *engine_handler.write() = Some(Box::new(ForwardToArc(handler.clone())));
 

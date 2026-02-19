@@ -138,6 +138,19 @@ pub trait SubagentEventHandler: Send + Sync {
 
     /// Called when the subagent encounters an error.
     fn on_agent_error(&self, subagent_id: String, error: String);
+
+    /// Called for each text token during streaming.
+    /// Only fires when the agent's definition has `streaming = true`.
+    fn on_stream_delta(&self, subagent_id: String, text: String);
+
+    /// Called when token usage is reported during streaming.
+    /// Only fires when the agent's definition has `streaming = true`.
+    fn on_stream_usage(
+        &self,
+        subagent_id: String,
+        input_tokens: u32,
+        output_tokens: u32,
+    );
 }
 
 // ============================================================================
