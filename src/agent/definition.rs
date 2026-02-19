@@ -8,6 +8,7 @@ use tokio::sync::RwLock;
 
 /// Definition of an agent type that can be spawned.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct AgentDefinition {
     /// Unique identifier for this agent type.
     pub agent_type: String,

@@ -74,7 +74,10 @@ impl Hook for SubagentEventProxyHook {
             | HookEvent::ResponseReceived { .. }
             | HookEvent::StreamDelta { .. }
             | HookEvent::StreamUsage { .. } => {
-                // These are handled at the FfiTaskTool level or not relevant
+                // StreamDelta/StreamUsage are intentionally not exposed over FFI yet.
+                // SubagentEventHandler doesn't have streaming callbacks; when Swift
+                // clients need real-time token delivery, add on_stream_delta/on_stream_usage
+                // methods to the trait and forward here.
             }
         }
 

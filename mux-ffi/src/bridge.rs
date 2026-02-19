@@ -65,7 +65,9 @@ impl Hook for FfiHookBridge {
                 agent_id: agent_id.clone(),
                 iteration: *iteration as u32,
             },
-            // Session, subagent, and response events - pass through without FFI callback
+            // Session, subagent, response, and streaming events - pass through without FFI callback.
+            // StreamDelta/StreamUsage are intentionally not exposed over FFI yet;
+            // HookEventType doesn't have streaming variants.
             HookEvent::SessionStart { .. }
             | HookEvent::SessionEnd { .. }
             | HookEvent::Stop { .. }
