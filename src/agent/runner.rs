@@ -321,6 +321,12 @@ impl SubAgent {
             }
 
             // No tool use - agent is done
+            // Add the final assistant response to transcript for completeness
+            self.messages.push(Message {
+                role: Role::Assistant,
+                content: response.content.clone(),
+            });
+
             let content = response.text();
 
             break SubAgentResult {
