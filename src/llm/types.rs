@@ -43,6 +43,10 @@ impl std::fmt::Display for MediaKind {
 }
 
 /// Source of media bytes. Base64 is inline; Url is remote; Path is local file.
+///
+/// Externally tagged (e.g. `{"base64": "..."}` rather than `{"kind":"base64","data":"..."}`)
+/// because serde does not support internally-tagged newtype variants over primitives.
+/// Providers use their own wire types, so this only affects on-disk JSON.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum MediaSource {
@@ -127,9 +131,11 @@ impl ContentBlock {
         }
     }
 
+    /// Create an image content block from base64-encoded bytes.
     pub fn image_base64(mime: impl Into<String>, data: impl Into<String>) -> Self {
         Self::media_base64(MediaKind::Image, mime, data)
     }
+    /// Create an image content block from a URL. Mime type is inferred by the provider from the URL extension at serialize time.
     pub fn image_url(url: impl Into<String>) -> Self {
         Self::Media {
             kind: MediaKind::Image,
@@ -137,6 +143,7 @@ impl ContentBlock {
             mime_type: String::new(),
         }
     }
+    /// Create an image content block from a local file path. Mime type is inferred from the file extension when the provider resolves the path.
     pub fn image_path(path: impl Into<PathBuf>) -> Self {
         Self::Media {
             kind: MediaKind::Image,
@@ -144,12 +151,15 @@ impl ContentBlock {
             mime_type: String::new(),
         }
     }
+    /// Create a document (e.g. PDF) content block from base64-encoded bytes.
     pub fn document_base64(mime: impl Into<String>, data: impl Into<String>) -> Self {
         Self::media_base64(MediaKind::Document, mime, data)
     }
+    /// Create an audio content block from base64-encoded bytes.
     pub fn audio_base64(mime: impl Into<String>, data: impl Into<String>) -> Self {
         Self::media_base64(MediaKind::Audio, mime, data)
     }
+    /// Create a video content block from base64-encoded bytes.
     pub fn video_base64(mime: impl Into<String>, data: impl Into<String>) -> Self {
         Self::media_base64(MediaKind::Video, mime, data)
     }

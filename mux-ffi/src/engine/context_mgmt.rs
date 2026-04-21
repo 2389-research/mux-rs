@@ -189,6 +189,7 @@ impl MuxEngine {
                             mux::llm::ContentBlock::ToolResult { content, .. } => {
                                 estimate_tokens(content)
                             }
+                            // Media tokens estimated in Task 14; 0 here is a placeholder.
                             mux::llm::ContentBlock::Media { .. } => 0,
                         })
                         .sum::<u32>()
@@ -293,6 +294,7 @@ impl MuxEngine {
                         mux::llm::ContentBlock::ToolResult { content, .. } => {
                             estimate_tokens(content)
                         }
+                        // Media tokens estimated in Task 14; 0 here is a placeholder.
                         mux::llm::ContentBlock::Media { .. } => 0,
                     })
                     .sum();
@@ -489,6 +491,7 @@ impl MuxEngine {
                         mux::llm::ContentBlock::ToolResult { content, .. } => {
                             estimate_tokens(content)
                         }
+                        // Media tokens estimated in Task 14; 0 here is a placeholder.
                         mux::llm::ContentBlock::Media { .. } => 0,
                     })
                     .sum::<u32>()
