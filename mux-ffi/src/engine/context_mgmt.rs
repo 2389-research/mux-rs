@@ -15,6 +15,34 @@ use mux::prelude::{ContentBlock, Role};
 use std::sync::Arc;
 use tokio::runtime::Runtime;
 
+/// Rough token estimate for a media block.
+///
+/// These are conservative upper-bound approximations used only for
+/// context-management compaction decisions — not for billing or request
+/// sizing. Actual provider token counts will differ.
+fn estimate_media_tokens(kind: mux::llm::MediaKind, source: &mux::llm::MediaSource) -> u32 {
+    let bytes = approx_media_bytes(source);
+    match kind {
+        mux::llm::MediaKind::Image => 1000,
+        mux::llm::MediaKind::Document => (bytes / 4) as u32,
+        mux::llm::MediaKind::Audio => (bytes / 1000) as u32,
+        mux::llm::MediaKind::Video => (bytes / 500) as u32,
+    }
+}
+
+/// Approximate the decoded byte size of a media source.
+///
+/// Base64 strings inflate bytes by ~4/3, so decoded size is roughly
+/// `len * 3 / 4`. Url and Path sources return 0 because the bytes aren't
+/// available pre-flight; compaction estimates are computed before the
+/// provider-resolve step fetches/reads them.
+fn approx_media_bytes(source: &mux::llm::MediaSource) -> usize {
+    match source {
+        mux::llm::MediaSource::Base64(data) => data.len() * 3 / 4,
+        mux::llm::MediaSource::Url(_) | mux::llm::MediaSource::Path(_) => 0,
+    }
+}
+
 /// Context configuration and usage methods
 impl MuxEngine {
     /// Set context configuration for a specific model.
@@ -189,8 +217,9 @@ impl MuxEngine {
                             mux::llm::ContentBlock::ToolResult { content, .. } => {
                                 estimate_tokens(content)
                             }
-                            // Media tokens estimated in Task 14; 0 here is a placeholder.
-                            mux::llm::ContentBlock::Media { .. } => 0,
+                            mux::llm::ContentBlock::Media { kind, source, .. } => {
+                                estimate_media_tokens(*kind, source)
+                            }
                         })
                         .sum::<u32>()
                 })
@@ -294,8 +323,9 @@ impl MuxEngine {
                         mux::llm::ContentBlock::ToolResult { content, .. } => {
                             estimate_tokens(content)
                         }
-                        // Media tokens estimated in Task 14; 0 here is a placeholder.
-                        mux::llm::ContentBlock::Media { .. } => 0,
+                        mux::llm::ContentBlock::Media { kind, source, .. } => {
+                            estimate_media_tokens(*kind, source)
+                        }
                     })
                     .sum();
 
@@ -491,11 +521,56 @@ impl MuxEngine {
                         mux::llm::ContentBlock::ToolResult { content, .. } => {
                             estimate_tokens(content)
                         }
-                        // Media tokens estimated in Task 14; 0 here is a placeholder.
-                        mux::llm::ContentBlock::Media { .. } => 0,
+                        mux::llm::ContentBlock::Media { kind, source, .. } => {
+                            estimate_media_tokens(*kind, source)
+                        }
                     })
                     .sum::<u32>()
             })
             .sum()
+    }
+}
+
+#[cfg(test)]
+mod token_estimate_tests {
+    use super::*;
+    use mux::llm::{MediaKind, MediaSource};
+
+    #[test]
+    fn image_has_flat_baseline() {
+        let s = MediaSource::Base64("aGVsbG8=".to_string());
+        assert_eq!(estimate_media_tokens(MediaKind::Image, &s), 1000);
+    }
+
+    #[test]
+    fn document_scales_with_bytes() {
+        // 4000 base64 chars ≈ 3000 bytes, doc estimate = 3000/4 = 750
+        let data = "A".repeat(4000);
+        let s = MediaSource::Base64(data);
+        assert_eq!(estimate_media_tokens(MediaKind::Document, &s), 750);
+    }
+
+    #[test]
+    fn audio_scales_with_bytes() {
+        let data = "A".repeat(40_000); // ~30kB
+        let s = MediaSource::Base64(data);
+        // 30000 / 1000 = 30
+        assert_eq!(estimate_media_tokens(MediaKind::Audio, &s), 30);
+    }
+
+    #[test]
+    fn video_scales_with_bytes() {
+        let data = "A".repeat(400_000); // ~300kB
+        let s = MediaSource::Base64(data);
+        // 300000 / 500 = 600
+        assert_eq!(estimate_media_tokens(MediaKind::Video, &s), 600);
+    }
+
+    #[test]
+    fn url_returns_zero_bytes_so_non_image_returns_zero() {
+        let s = MediaSource::Url("https://example.com/x.png".to_string());
+        assert_eq!(estimate_media_tokens(MediaKind::Document, &s), 0);
+        // Image still has the flat baseline regardless of source bytes
+        assert_eq!(estimate_media_tokens(MediaKind::Image, &s), 1000);
     }
 }
