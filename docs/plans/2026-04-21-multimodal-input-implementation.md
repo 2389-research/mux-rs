@@ -4,7 +4,7 @@
 
 **Goal:** Add multimodal input (images, documents, audio, video) to `mux`'s LLM abstraction across all providers, with a capability query for frontends and typed errors on unsupported kinds.
 
-**Architecture:** Introduce a unified `ContentBlock::Media { kind, source, mime_type }` variant. Each provider serializes media into its native wire format via existing `From<&Request>` paths; unsupported (provider, kind) pairs raise `LlmError::UnsupportedMedia` at serialize time. A new `LlmClient::supports_media(kind)` method lets frontends query capability. FFI bindings mirror the new types for Swift callers.
+**Architecture:** Introduce a unified `ContentBlock::Media { kind, source, mime_type }` variant. `create_message` / `create_message_stream` resolve media via `resolve_request_media` / `resolve_request_media_fully`, then call fallible `try_into_<provider>_request(&resolved)` helpers that emit the provider's native wire format. Unsupported (provider, kind) pairs raise `LlmError::UnsupportedMedia` at serialize time. A new `LlmClient::supports_media(kind)` method lets frontends query capability. FFI bindings mirror the new types for Swift callers.
 
 **Tech Stack:** Rust 2024, `reqwest`, `async-trait`, `serde`, `thiserror`, UniFFI (for mux-ffi).
 
@@ -88,7 +88,7 @@ fn test_document_audio_video_constructors() {
 
 **Step 2: Run tests — expect failures**
 
-```
+```sh
 cargo test -p mux --lib llm::types_test
 ```
 
@@ -166,45 +166,45 @@ pub fn user_with(content: Vec<ContentBlock>) -> Self {
 
 **Step 4: Run tests — expect pass**
 
-```
+```sh
 cargo test -p mux --lib llm::types_test
 ```
 
 Every test added in Step 1 passes.
 
-**Step 5: Run the broader suite to catch non-exhaustive match warnings**
+**Step 5: Keep the workspace buildable**
 
-```
-cargo build -p mux --all-targets 2>&1 | head -100
-```
+Adding a new variant to `ContentBlock` makes every existing `match` on it non-exhaustive. Keep the crate buildable by adding placeholder arms at each match site. Do NOT use `unreachable!()` — placeholder work is a known "not yet implemented" state, not a logical impossibility.
 
-Expected: compile errors in every file that matches on `ContentBlock` without the new arm. These are the files you'll touch in Phase 3. Note them but don't fix yet — they get fixed per-provider in their own tasks. **For this task only**, silence them by adding a temporary `_ => unreachable!("Media handled in later task")` arm in files outside `src/llm/` is NOT permitted; instead add a temporary `ContentBlock::Media { .. } => {}` noop arm to every non-llm file that matches `ContentBlock`, and leave `src/llm/` provider files as-is (they stay broken until Phase 3). We'll fix the noop arms later.
+- Provider serialization sites (`src/llm/anthropic.rs`, `src/llm/openai.rs`, `src/llm/gemini.rs`) — use `todo!("Media handling in later task")`. These panic only if exercised, which they won't be until Phase 3 replaces them with real logic.
+- Context-management / token-estimation sites (`mux-ffi/src/engine/context_mgmt.rs`) — use `=> 0` with a comment pointing to Task 14.
+- `filter_map` / wildcard sites that already have `_ =>` arms — no change needed.
 
-Better plan: after Task 1, leave the compile errors in `src/llm/anthropic.rs`, `src/llm/openai.rs`, etc. as intentional red — they signal Phase 3 work. Commit only `src/llm/types.rs` and `src/llm/types_test.rs` and the crate won't build until Phase 3 completes.
+Exact sites to touch (grep to confirm line numbers in your working copy):
 
-Decision: **don't leave main broken.** Add minimal `ContentBlock::Media { .. } => unreachable!("filled in later task")` arms to every non-test match site in `src/` and `mux-ffi/src/`. Each Phase 3 task replaces its own provider's placeholder with real code. List the exact sites:
+- `src/llm/anthropic.rs` (in `From<&ContentBlock> for AnthropicContent`) — `todo!()`
+- `src/llm/openai.rs` (in `OpenAIMessage::from` and the text-collection `filter_map`) — `todo!()` / safe default
+- `src/llm/gemini.rs` (in `convert_message_to_content`) — `todo!()`
+- `mux-ffi/src/callback_client.rs` (content `filter_map`) — safe default
+- `mux-ffi/src/engine/context_mgmt.rs` (token-estimation matches) — `=> 0`
+- `mux-ffi/src/engine/mod.rs` (if any `ContentBlock` match exists — grep to confirm)
 
-- `src/llm/anthropic.rs:187` (in `From<&ContentBlock> for AnthropicContent`)
-- `src/llm/openai.rs:262` (in `OpenAIMessage::from`)
-- `src/llm/openai.rs:280` (in text collection filter_map)
-- `src/llm/gemini.rs:243` (in `convert_message_to_content`)
-- `mux-ffi/src/callback_client.rs:38` (in content filter_map)
-- `mux-ffi/src/engine/context_mgmt.rs:184`, `:287`, `:378`, `:482`, `:290`, `:189` (token estimation matches — add arm returning 0)
-- `mux-ffi/src/engine/mod.rs:374` (if any ContentBlock match exists — grep to confirm)
-
-For this task add the minimal arms only (no real logic), so the crate builds. Each provider task replaces the arm with its real implementation.
+Each Phase 3 task replaces its own provider's placeholder with real logic. Phase 3 Task 14 replaces the `=> 0` estimation arms with real heuristics.
 
 **Step 6: Confirm build + tests pass**
 
-```
+```sh
 cargo fmt --all
-cargo clippy --all-targets -- -D warnings
+cargo build --workspace --all-targets
+cargo clippy --all-targets --workspace -- -D warnings
 cargo test --workspace
 ```
 
+All must pass. If clippy complains about `todo!()`, narrowly scope an `#[allow(clippy::todo)]` at the match arm — prefer leaving it visible.
+
 **Step 7: Commit**
 
-```
+```sh
 git add -A
 git commit -m "feat(llm): add ContentBlock::Media variant and MediaKind/MediaSource types"
 ```
@@ -242,7 +242,7 @@ mod error_test {
 
 **Step 2: Run — expect failure**
 
-```
+```sh
 cargo test -p mux --lib error_test
 ```
 
@@ -262,13 +262,13 @@ Adjust the `Debug` format for `kind` — use a lowercased manual format if `#[de
 
 **Step 4: Run — expect pass**
 
-```
+```sh
 cargo test -p mux --lib error_test
 ```
 
 **Step 5: Commit**
 
-```
+```sh
 git add src/error.rs src/llm/types.rs
 git commit -m "feat(llm): add UnsupportedMedia and Io variants to LlmError"
 ```
@@ -310,7 +310,7 @@ mod client_test {
 
 **Step 2: Run — expect failure** (method not found)
 
-```
+```sh
 cargo test -p mux --lib llm::client::client_test
 ```
 
@@ -326,13 +326,13 @@ fn supports_media(&self, _kind: super::MediaKind) -> bool { false }
 
 **Step 4: Run — expect pass**
 
-```
+```sh
 cargo test -p mux --lib llm::client::client_test
 ```
 
 **Step 5: Commit**
 
-```
+```sh
 git add src/llm/client.rs
 git commit -m "feat(llm): add supports_media to LlmClient trait"
 ```
@@ -457,13 +457,13 @@ mod tests {
 
 Check `Cargo.toml` — `base64` probably isn't in deps. Add to `[dependencies]`:
 
-```
+```toml
 base64 = "0.22"
 ```
 
 And `tempfile` to `[dev-dependencies]` if missing:
 
-```
+```toml
 tempfile = "3"
 ```
 
@@ -480,13 +480,13 @@ pub use media::*;
 
 **Step 4: Run tests — expect pass**
 
-```
+```sh
 cargo test -p mux --lib llm::media
 ```
 
 **Step 5: Commit**
 
-```
+```sh
 git add src/llm/media.rs src/llm/mod.rs Cargo.toml Cargo.lock
 git commit -m "feat(llm): add resolve_to_base64 helper for MediaSource"
 ```
@@ -516,7 +516,7 @@ fn test_anthropic_image_base64_serialization() {
             ContentBlock::image_base64("image/png", "aGVsbG8="),
         ]),
     );
-    let ar = AnthropicRequest::from(&req);
+    let ar = try_into_anthropic_request(&req).unwrap();
     let json = serde_json::to_value(&ar).unwrap();
     let content = &json["messages"][0]["content"];
     assert_eq!(content[0]["type"], "text");
@@ -531,7 +531,7 @@ fn test_anthropic_image_url_serialization() {
     let req = Request::new("claude-sonnet-4-20250514").message(
         Message::user_with(vec![ContentBlock::image_url("https://example.com/a.png")]),
     );
-    let ar = AnthropicRequest::from(&req);
+    let ar = try_into_anthropic_request(&req).unwrap();
     let json = serde_json::to_value(&ar).unwrap();
     let src = &json["messages"][0]["content"][0]["source"];
     assert_eq!(src["type"], "url");
@@ -543,7 +543,7 @@ fn test_anthropic_document_serialization() {
     let req = Request::new("claude-sonnet-4-20250514").message(
         Message::user_with(vec![ContentBlock::document_base64("application/pdf", "JVBE")]),
     );
-    let ar = AnthropicRequest::from(&req);
+    let ar = try_into_anthropic_request(&req).unwrap();
     let json = serde_json::to_value(&ar).unwrap();
     assert_eq!(json["messages"][0]["content"][0]["type"], "document");
 }
@@ -569,7 +569,7 @@ fn test_anthropic_supports_media() {
 
 **Step 2: Run — expect failure**
 
-```
+```sh
 cargo test -p mux --lib llm::anthropic_test
 ```
 
@@ -669,13 +669,13 @@ fn supports_media(&self, kind: MediaKind) -> bool {
 
 **Step 4: Run tests — expect pass**
 
-```
+```sh
 cargo test -p mux --lib llm::anthropic
 ```
 
 **Step 5: Commit**
 
-```
+```sh
 git add src/llm/anthropic.rs src/llm/anthropic_test.rs
 git commit -m "feat(llm): Anthropic image/document media serialization"
 ```
@@ -733,7 +733,7 @@ fn test_openai_supports_media() {
 
 **Step 2: Run — expect failure**
 
-```
+```sh
 cargo test -p mux --lib llm::openai
 ```
 
@@ -783,13 +783,13 @@ pub struct OpenAIInputAudio { pub data: String, pub format: String }
 
 **Step 4: Run — expect pass**
 
-```
+```sh
 cargo test -p mux --lib llm::openai
 ```
 
 **Step 5: Commit**
 
-```
+```sh
 git add src/llm/openai.rs src/llm/media.rs src/llm/mod.rs
 git commit -m "feat(llm): OpenAI image/document/audio media serialization"
 ```
@@ -852,7 +852,7 @@ For Ollama specifically: since it currently uses the OpenAI serialization but on
 
 **Step 5: Commit**
 
-```
+```sh
 git add src/llm/openrouter.rs src/llm/ollama.rs
 git commit -m "feat(llm): OpenRouter/Ollama capability queries and Ollama non-image rejection"
 ```
@@ -927,7 +927,7 @@ pub struct GeminiFileData { pub mime_type: String, pub file_uri: String }
 
 **Step 5: Commit**
 
-```
+```sh
 git add src/llm/gemini.rs
 git commit -m "feat(llm): Gemini media serialization for all four kinds"
 ```
@@ -946,7 +946,7 @@ git commit -m "feat(llm): Gemini media serialization for all four kinds"
 
 **Step 1: Generate**
 
-```
+```sh
 mkdir -p tests/fixtures
 python3 -c "import base64; open('tests/fixtures/tiny.png','wb').write(base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNgAAIAAAUAAeImBZsAAAAASUVORK5CYII='))"
 ```
@@ -955,7 +955,7 @@ For PDF/WAV/MP4, use small well-known fixture generators or bundle similar minim
 
 **Step 2: Commit**
 
-```
+```sh
 git add tests/fixtures
 git commit -m "test: add tiny multimodal fixtures"
 ```
@@ -1004,7 +1004,7 @@ async fn anthropic_sees_image() {
 
 **Step 2: Run (manually if keys are set)**
 
-```
+```sh
 cargo test --test integration_media -- --nocapture
 ```
 
@@ -1012,7 +1012,7 @@ Expected: pass when keys set, skip messages printed otherwise.
 
 **Step 3: Commit**
 
-```
+```sh
 git add tests/integration_media.rs
 git commit -m "test: provider round-trip integration tests for media"
 ```
@@ -1094,13 +1094,13 @@ mod tests {
 
 **Step 2: Run**
 
-```
+```sh
 cargo test -p mux-ffi media
 ```
 
 **Step 3: Commit**
 
-```
+```sh
 git add mux-ffi/src/media.rs mux-ffi/src/lib.rs
 git commit -m "feat(mux-ffi): FfiMedia/FfiMediaKind/FfiMediaSource types"
 ```
@@ -1136,7 +1136,7 @@ async fn test_callback_client_forwards_media() {
 
 **Step 5: Commit**
 
-```
+```sh
 git add mux-ffi/src
 git commit -m "feat(mux-ffi): thread media attachments through ChatMessage"
 ```
@@ -1194,7 +1194,7 @@ fn supports_media(&self, kind: MediaKind) -> bool {
 
 **Step 5: Commit**
 
-```
+```sh
 git add mux-ffi/src
 git commit -m "feat(mux-ffi): LlmProvider::supports_media bridged to LlmClient"
 ```
@@ -1237,13 +1237,13 @@ Where `estimate_media_tokens` returns:
 
 **Step 3: Run tests**
 
-```
+```sh
 cargo test -p mux-ffi
 ```
 
 **Step 4: Commit**
 
-```
+```sh
 git add mux-ffi/src/engine
 git commit -m "feat(mux-ffi): token estimation for Media blocks"
 ```
@@ -1284,13 +1284,13 @@ fn test_save_and_load_roundtrip_with_media() {
 
 **Step 2: Run**
 
-```
+```sh
 cargo test -p mux-ffi engine::persistence
 ```
 
 **Step 3: Commit**
 
-```
+```sh
 git add mux-ffi/src/engine/persistence.rs
 git commit -m "test(mux-ffi): persistence round-trip for Media blocks"
 ```
@@ -1301,7 +1301,7 @@ git commit -m "test(mux-ffi): persistence round-trip for Media blocks"
 
 **Step 1: Full workspace check**
 
-```
+```sh
 cargo fmt --all
 cargo clippy --all-targets --workspace -- -D warnings
 cargo test --workspace
@@ -1311,7 +1311,7 @@ Fix any remaining warnings. Every Phase 3 provider should have already cleaned u
 
 **Step 2: Grep for stale placeholders**
 
-```
+```sh
 grep -rn "unreachable!" src mux-ffi/src | grep -i "media\|later task"
 ```
 
@@ -1319,7 +1319,7 @@ Must return nothing.
 
 **Step 3: Commit if anything changed**
 
-```
+```sh
 git status
 # if clean, skip
 git add -A && git commit -m "chore: final polish for multimodal input"

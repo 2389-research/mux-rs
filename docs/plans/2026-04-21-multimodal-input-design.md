@@ -55,7 +55,7 @@ Constructors:
 - Equivalents for `document_*`, `audio_*`, `video_*`
 - `Message::user_with(Vec<ContentBlock>)` for multi-block user messages
 
-`MediaSource::Path` is resolved lazily inside each provider's `From<&Request>` serialization — not in the constructor. Path-read errors surface as `LlmError::Io`.
+`MediaSource::Path` is resolved by `resolve_request_media` / `resolve_request_media_fully` inside each provider's `create_message` / `create_message_stream`, before the fallible `try_into_<provider>_request(&resolved)` helpers are invoked — not in the constructor. Path-read errors surface as `LlmError::Io`. URL-fetch errors surface as `LlmError::Configuration` (from the SSRF validator) or `LlmError::Http` (from `reqwest`).
 
 ## Provider Wire Format Mapping
 
@@ -82,7 +82,7 @@ LlmError::UnsupportedMedia {
 }
 ```
 
-Raised at serialize time inside each provider's `From<&Request>` when a `Media` block's kind isn't supported.
+Raised at serialize time inside each provider's fallible `try_into_<provider>_request` helper when a `Media` block's kind isn't supported.
 
 Capability query on the `LlmClient` trait:
 
@@ -134,7 +134,7 @@ Follows the TDD rule in `CLAUDE.md`: no mocks, real data/APIs.
 
 **Unit tests:**
 - `src/llm/types_test.rs`: constructors, serde round-trip for `Media`, `MediaSource::Path` resolution against a real temp file
-- Per-provider serialization tests: `AnthropicRequest::from(&Request)` with each supported `Media` kind produces the exact expected JSON shape. Uses small committed fixtures (`tests/fixtures/`: tiny PNG, PDF, WAV, MP4)
+- Per-provider serialization tests: `try_into_anthropic_request(&req)` (and equivalents for other providers) with each supported `Media` kind produces the exact expected JSON shape. Uses small committed fixtures (`tests/fixtures/`: tiny PNG, PDF, WAV, MP4)
 - Unsupported-media tests: assert `LlmError::UnsupportedMedia` for each (provider, unsupported-kind) pair
 - Capability query tests: each client returns its documented set
 
