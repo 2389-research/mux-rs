@@ -34,6 +34,15 @@ pub enum LlmError {
 
     #[error("Configuration error: {0}")]
     Configuration(String),
+
+    #[error("{provider} does not support {kind} media")]
+    UnsupportedMedia {
+        provider: &'static str,
+        kind: crate::llm::MediaKind,
+    },
+
+    #[error("IO error: {0}")]
+    Io(#[from] std::io::Error),
 }
 
 /// Errors from tool operations.
@@ -79,4 +88,25 @@ pub enum McpError {
 
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
+}
+
+#[cfg(test)]
+mod error_test {
+    use super::*;
+    use crate::llm::MediaKind;
+
+    #[test]
+    fn test_unsupported_media_display() {
+        let err = LlmError::UnsupportedMedia {
+            provider: "anthropic",
+            kind: MediaKind::Audio,
+        };
+        assert_eq!(err.to_string(), "anthropic does not support audio media");
+    }
+
+    #[test]
+    fn test_io_display() {
+        let err = LlmError::Io(std::io::Error::new(std::io::ErrorKind::NotFound, "missing"));
+        assert!(err.to_string().contains("missing"));
+    }
 }
