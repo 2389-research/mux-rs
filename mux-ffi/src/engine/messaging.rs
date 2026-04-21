@@ -358,8 +358,23 @@ impl MuxEngine {
             .await;
         subagent = subagent.with_hooks(hook_registry);
 
-        // Run the agent with the user's message
-        let result = match subagent.run(&content).await {
+        // Run the agent with the user's message. If media attachments are
+        // present, dispatch through `run_with_blocks` so the media blocks
+        // reach the provider alongside the text; otherwise use the plain
+        // text path.
+        let run_result = if media.is_empty() {
+            subagent.run(&content).await
+        } else {
+            let mut blocks: Vec<ContentBlock> = Vec::with_capacity(1 + media.len());
+            if !content.is_empty() {
+                blocks.push(ContentBlock::text(content.clone()));
+            }
+            for m in media.clone() {
+                blocks.push(m.into_content_block());
+            }
+            subagent.run_with_blocks(blocks).await
+        };
+        let result = match run_result {
             Ok(result) => result,
             Err(e) => {
                 let error_str = e.to_string();
@@ -833,7 +848,13 @@ mod tests {
             fn on_agent_completed(&self, _: String, _: String, _: u32, _: u32, _: bool) {}
             fn on_agent_error(&self, _: String, _: String) {}
             fn on_stream_delta(&self, _subagent_id: String, _text: String) {}
-            fn on_stream_usage(&self, _subagent_id: String, _input_tokens: u32, _output_tokens: u32) {}
+            fn on_stream_usage(
+                &self,
+                _subagent_id: String,
+                _input_tokens: u32,
+                _output_tokens: u32,
+            ) {
+            }
         }
 
         engine.set_subagent_event_handler(Box::new(DummyHandler));
@@ -869,7 +890,13 @@ mod tests {
             fn on_agent_completed(&self, _: String, _: String, _: u32, _: u32, _: bool) {}
             fn on_agent_error(&self, _: String, _: String) {}
             fn on_stream_delta(&self, _subagent_id: String, _text: String) {}
-            fn on_stream_usage(&self, _subagent_id: String, _input_tokens: u32, _output_tokens: u32) {}
+            fn on_stream_usage(
+                &self,
+                _subagent_id: String,
+                _input_tokens: u32,
+                _output_tokens: u32,
+            ) {
+            }
         }
 
         engine.set_subagent_event_handler(Box::new(DummyHandler));
@@ -913,7 +940,13 @@ mod tests {
             fn on_agent_completed(&self, _: String, _: String, _: u32, _: u32, _: bool) {}
             fn on_agent_error(&self, _: String, _: String) {}
             fn on_stream_delta(&self, _subagent_id: String, _text: String) {}
-            fn on_stream_usage(&self, _subagent_id: String, _input_tokens: u32, _output_tokens: u32) {}
+            fn on_stream_usage(
+                &self,
+                _subagent_id: String,
+                _input_tokens: u32,
+                _output_tokens: u32,
+            ) {
+            }
         }
 
         engine.set_subagent_event_handler(Box::new(DummyHandler));
@@ -948,7 +981,7 @@ mod tests {
     // ========================================================================
 
     use crate::callback::LlmProvider;
-    use crate::types::{LlmRequest, LlmResponse, LlmToolCall, LlmUsage};
+    use crate::types::{ChatRole, LlmRequest, LlmResponse, LlmToolCall, LlmUsage};
     use std::sync::atomic::AtomicU32;
 
     /// Mock LLM provider that returns canned responses.
@@ -1351,6 +1384,89 @@ mod tests {
 
         // Verify we made 2 calls total
         assert_eq!(call_count.load(Ordering::SeqCst), 2);
+
+        engine.delete_workspace(ws.id).unwrap();
+    }
+
+    #[test]
+    fn test_do_send_message_media_reaches_real_llm_provider() {
+        // Verifies that media attachments plumbed through do_send_message reach
+        // the provider on the real-LLM path (via SubAgent::run_with_blocks),
+        // not just the echo fallback path.
+        let engine = create_test_engine();
+        let ws = engine
+            .create_workspace("Media RealLLM Test".to_string(), None)
+            .unwrap();
+        let conv = engine
+            .create_conversation(ws.id.clone(), "Test Conv".to_string())
+            .unwrap();
+
+        /// Provider that captures the most recent request's user-message media count.
+        struct CapturingProvider {
+            captured_media_count: Arc<std::sync::Mutex<Option<usize>>>,
+        }
+
+        impl LlmProvider for CapturingProvider {
+            fn generate(&self, request: LlmRequest) -> LlmResponse {
+                // Find the user message and record how many media blocks it has.
+                let user_media = request
+                    .messages
+                    .iter()
+                    .find(|m| matches!(m.role, ChatRole::User))
+                    .map(|m| m.media.len())
+                    .unwrap_or(0);
+                *self.captured_media_count.lock().unwrap() = Some(user_media);
+
+                LlmResponse {
+                    text: "ack".to_string(),
+                    tool_calls: vec![],
+                    usage: LlmUsage {
+                        input_tokens: 1,
+                        output_tokens: 1,
+                    },
+                    error: None,
+                }
+            }
+
+            fn supports_media(&self, _kind: crate::media::FfiMediaKind) -> bool {
+                true
+            }
+        }
+
+        let captured: Arc<std::sync::Mutex<Option<usize>>> = Arc::new(std::sync::Mutex::new(None));
+        let provider = CapturingProvider {
+            captured_media_count: captured.clone(),
+        };
+        engine.register_llm_provider("media-capture".to_string(), Box::new(provider));
+        engine.set_default_provider(Provider::Custom {
+            name: "media-capture".to_string(),
+        });
+
+        let media = vec![crate::media::FfiMedia {
+            kind: crate::media::FfiMediaKind::Image,
+            source: crate::media::FfiMediaSource::Base64 {
+                data: "aGVsbG8=".to_string(),
+            },
+            mime_type: "image/png".to_string(),
+        }];
+
+        let callback = Arc::new(TrackingCallback::new());
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let result = rt.block_on(engine.do_send_message(
+            conv.id.clone(),
+            "Describe this image".to_string(),
+            media,
+            Arc::new(Box::new(CallbackWrapper(callback.clone()))),
+        ));
+        assert!(result.is_ok(), "do_send_message failed: {:?}", result);
+
+        // Confirm the provider observed the media on the user message.
+        let captured = captured.lock().unwrap();
+        assert_eq!(
+            *captured,
+            Some(1),
+            "provider should have seen 1 media block on the user message"
+        );
 
         engine.delete_workspace(ws.id).unwrap();
     }
