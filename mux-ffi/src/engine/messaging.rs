@@ -162,6 +162,7 @@ impl MuxEngine {
         &self,
         conversation_id: String,
         content: String,
+        media: Vec<crate::media::FfiMedia>,
         callback: Arc<Box<dyn ChatCallback>>,
     ) -> Result<ChatResult, String> {
         // Get current provider and create appropriate client
@@ -200,6 +201,16 @@ impl MuxEngine {
                         let echo_text = format!("(No API key set) Echo: {}", content);
                         callback.on_text_delta(echo_text.clone());
 
+                        // Build user content blocks with any attached media.
+                        let mut user_blocks: Vec<ContentBlock> =
+                            Vec::with_capacity(1 + media.len());
+                        if !content.is_empty() {
+                            user_blocks.push(ContentBlock::text(content.clone()));
+                        }
+                        for m in media {
+                            user_blocks.push(m.into_content_block());
+                        }
+
                         // Store in history
                         {
                             let mut history = self.message_history.write();
@@ -208,7 +219,7 @@ impl MuxEngine {
                                 .or_insert_with(Vec::new);
                             messages.push(StoredMessage {
                                 role: Role::User,
-                                content: vec![ContentBlock::text(content.clone())],
+                                content: user_blocks,
                             });
                             messages.push(StoredMessage {
                                 role: Role::Assistant,
@@ -626,6 +637,7 @@ mod tests {
         let result = rt.block_on(engine.do_send_message(
             conv.id.clone(),
             "Hello world".to_string(),
+            Vec::new(),
             Arc::new(Box::new({
                 struct Wrapper(Arc<TrackingCallback>);
                 impl ChatCallback for Wrapper {
@@ -690,6 +702,7 @@ mod tests {
         let result = rt.block_on(engine.do_send_message(
             conv.id.clone(),
             "Hello".to_string(),
+            Vec::new(),
             Arc::new(Box::new({
                 struct Wrapper(Arc<TrackingCallback>);
                 impl ChatCallback for Wrapper {
@@ -725,6 +738,65 @@ mod tests {
         let error_received = callback.error_received.lock().unwrap();
         assert!(error_received.is_some());
         assert!(error_received.as_ref().unwrap().contains("my-custom-llm"));
+
+        engine.delete_workspace(ws.id).unwrap();
+    }
+
+    #[test]
+    fn test_do_send_message_media_attached_to_user_message_echo_fallback() {
+        // Verifies the `media` parameter plumbed through send_message ->
+        // do_send_message is actually attached to the stored user message.
+        // Uses the echo-fallback path (no API key) which is the Message::user
+        // construction site inside do_send_message itself.
+        let engine = create_test_engine();
+        let ws = engine
+            .create_workspace("Media Attach Test".to_string(), None)
+            .unwrap();
+        let conv = engine
+            .create_conversation(ws.id.clone(), "Test Conv".to_string())
+            .unwrap();
+
+        let media = vec![crate::media::FfiMedia {
+            kind: crate::media::FfiMediaKind::Image,
+            source: crate::media::FfiMediaSource::Base64 {
+                data: "aGVsbG8=".to_string(),
+            },
+            mime_type: "image/png".to_string(),
+        }];
+
+        let callback = Arc::new(TrackingCallback::new());
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let result = rt.block_on(engine.do_send_message(
+            conv.id.clone(),
+            "Describe this image".to_string(),
+            media,
+            Arc::new(Box::new(CallbackWrapper(callback.clone()))),
+        ));
+
+        assert!(result.is_ok());
+
+        // The stored user message should contain both the text block and the
+        // media block, confirming `media` reached the Message construction.
+        let history = engine.message_history.read();
+        let messages = history.get(&conv.id).expect("history entry for conv");
+        let user_msg = messages
+            .iter()
+            .find(|m| matches!(m.role, Role::User))
+            .expect("user message stored");
+        assert_eq!(
+            user_msg.content.len(),
+            2,
+            "user message should have text + media blocks"
+        );
+        assert!(matches!(user_msg.content[0], ContentBlock::Text { .. }));
+        assert!(matches!(
+            user_msg.content[1],
+            ContentBlock::Media {
+                kind: mux::llm::MediaKind::Image,
+                ..
+            }
+        ));
+        drop(history);
 
         engine.delete_workspace(ws.id).unwrap();
     }
@@ -1000,6 +1072,7 @@ mod tests {
         let result = rt.block_on(engine.do_send_message(
             conv.id.clone(),
             "Hi there".to_string(),
+            Vec::new(),
             Arc::new(Box::new(CallbackWrapper(callback.clone()))),
         ));
 
@@ -1047,6 +1120,7 @@ mod tests {
         let result = rt.block_on(engine.do_send_message(
             conv.id.clone(),
             "Read that file for me".to_string(),
+            Vec::new(),
             Arc::new(Box::new(CallbackWrapper(callback.clone()))),
         ));
 
@@ -1105,6 +1179,7 @@ mod tests {
         let result = rt.block_on(engine.do_send_message(
             conv.id.clone(),
             "Do something".to_string(),
+            Vec::new(),
             Arc::new(Box::new(CallbackWrapper(callback.clone()))),
         ));
 
@@ -1143,6 +1218,7 @@ mod tests {
         let result = rt.block_on(engine.do_send_message(
             conv.id.clone(),
             "Loop forever".to_string(),
+            Vec::new(),
             Arc::new(Box::new(CallbackWrapper(callback.clone()))),
         ));
 
@@ -1184,6 +1260,7 @@ mod tests {
         let result = rt.block_on(engine.do_send_message(
             conv.id.clone(),
             "Trigger error".to_string(),
+            Vec::new(),
             Arc::new(Box::new(CallbackWrapper(callback.clone()))),
         ));
 
@@ -1257,6 +1334,7 @@ mod tests {
         let result1 = rt.block_on(engine.do_send_message(
             conv.id.clone(),
             "First message".to_string(),
+            Vec::new(),
             Arc::new(Box::new(CallbackWrapper(callback1.clone()))),
         ));
         assert!(result1.is_ok());
@@ -1266,6 +1344,7 @@ mod tests {
         let result2 = rt.block_on(engine.do_send_message(
             conv.id.clone(),
             "Second message".to_string(),
+            Vec::new(),
             Arc::new(Box::new(CallbackWrapper(callback2.clone()))),
         ));
         assert!(result2.is_ok());
