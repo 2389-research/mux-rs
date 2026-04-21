@@ -220,3 +220,21 @@ fn test_anthropic_supports_media() {
     assert!(!client.supports_media(MediaKind::Audio));
     assert!(!client.supports_media(MediaKind::Video));
 }
+
+#[test]
+fn test_anthropic_document_url_errors() {
+    // Anthropic does not support URL sources for documents — only images.
+    let req = Request::new("claude-sonnet-4-20250514").message(Message::user_with(vec![
+        ContentBlock::Media {
+            kind: MediaKind::Document,
+            source: MediaSource::Url("https://example.com/doc.pdf".to_string()),
+            mime_type: "application/pdf".to_string(),
+        },
+    ]));
+    let result = try_into_anthropic_request(&req);
+    assert!(
+        matches!(result, Err(crate::error::LlmError::Configuration(_))),
+        "expected Configuration error for Document+URL, got {:?}",
+        result
+    );
+}

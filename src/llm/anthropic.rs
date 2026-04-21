@@ -219,6 +219,13 @@ fn try_anthropic_content(block: &ContentBlock) -> Result<AnthropicContent, LlmEr
             source,
             mime_type,
         } => {
+            // Anthropic does not accept URL sources for documents. Images are fine.
+            if matches!(kind, MediaKind::Document) && matches!(source, MediaSource::Url(_)) {
+                return Err(LlmError::Configuration(
+                    "anthropic does not accept URL sources for documents (only base64, text, content, or file)"
+                        .into(),
+                ));
+            }
             let ant_source = match source {
                 MediaSource::Base64(data) => AnthropicSource::Base64 {
                     media_type: mime_type.clone(),
