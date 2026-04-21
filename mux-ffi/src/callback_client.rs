@@ -166,6 +166,11 @@ impl LlmClient for CallbackLlmClient {
             })
         }))
     }
+
+    fn supports_media(&self, kind: mux::llm::MediaKind) -> bool {
+        let ffi_kind: crate::media::FfiMediaKind = kind.into();
+        self.provider.supports_media(ffi_kind)
+    }
 }
 
 #[cfg(test)]
@@ -195,6 +200,10 @@ mod tests {
                 error: None,
             }
         }
+
+        fn supports_media(&self, _kind: crate::media::FfiMediaKind) -> bool {
+            false
+        }
     }
 
     struct ToolUseProvider;
@@ -211,6 +220,10 @@ mod tests {
                 usage: LlmUsage::default(),
                 error: None,
             }
+        }
+
+        fn supports_media(&self, _kind: crate::media::FfiMediaKind) -> bool {
+            false
         }
     }
 
@@ -252,6 +265,10 @@ mod tests {
                 error: Some("Model failed to generate".to_string()),
             }
         }
+
+        fn supports_media(&self, _kind: crate::media::FfiMediaKind) -> bool {
+            false
+        }
     }
 
     #[tokio::test]
@@ -280,6 +297,10 @@ mod tests {
                 usage: LlmUsage::default(),
                 error: None,
             }
+        }
+
+        fn supports_media(&self, _kind: crate::media::FfiMediaKind) -> bool {
+            false
         }
     }
 
@@ -328,6 +349,10 @@ mod tests {
                     error: None,
                 }
             }
+
+            fn supports_media(&self, _kind: crate::media::FfiMediaKind) -> bool {
+                false
+            }
         }
 
         let captured: Arc<Mutex<Option<LlmRequest>>> = Arc::new(Mutex::new(None));
@@ -352,5 +377,31 @@ mod tests {
         assert_eq!(msg.media.len(), 1);
         assert!(matches!(msg.media[0].kind, FfiMediaKind::Image));
         assert_eq!(msg.media[0].mime_type, "image/png");
+    }
+
+    #[test]
+    fn test_callback_client_delegates_supports_media() {
+        use mux::llm::{LlmClient, MediaKind};
+
+        struct ImageOnlyProvider;
+        impl LlmProvider for ImageOnlyProvider {
+            fn generate(&self, _: LlmRequest) -> LlmResponse {
+                LlmResponse {
+                    text: String::new(),
+                    tool_calls: Vec::new(),
+                    usage: LlmUsage::default(),
+                    error: None,
+                }
+            }
+            fn supports_media(&self, kind: crate::media::FfiMediaKind) -> bool {
+                matches!(kind, crate::media::FfiMediaKind::Image)
+            }
+        }
+
+        let client = CallbackLlmClient::new(Box::new(ImageOnlyProvider));
+        assert!(client.supports_media(MediaKind::Image));
+        assert!(!client.supports_media(MediaKind::Document));
+        assert!(!client.supports_media(MediaKind::Audio));
+        assert!(!client.supports_media(MediaKind::Video));
     }
 }

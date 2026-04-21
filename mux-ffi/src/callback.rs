@@ -145,12 +145,7 @@ pub trait SubagentEventHandler: Send + Sync {
 
     /// Called when token usage is reported during streaming.
     /// Only fires when the agent's definition has `streaming = true`.
-    fn on_stream_usage(
-        &self,
-        subagent_id: String,
-        input_tokens: u32,
-        output_tokens: u32,
-    );
+    fn on_stream_usage(&self, subagent_id: String, input_tokens: u32, output_tokens: u32);
 }
 
 // ============================================================================
@@ -182,4 +177,10 @@ pub trait LlmProvider: Send + Sync {
     /// This is a blocking call - implement with async internally if needed.
     /// Return LlmResponse with error field set if generation fails.
     fn generate(&self, request: LlmRequest) -> LlmResponse;
+
+    /// Does this provider support the given media kind as input?
+    ///
+    /// Return `true` only for media kinds the on-device model actually handles.
+    /// Frontends use this to decide whether to offer attachment UI.
+    fn supports_media(&self, kind: crate::media::FfiMediaKind) -> bool;
 }

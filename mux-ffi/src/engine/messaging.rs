@@ -945,6 +945,10 @@ mod tests {
                 MockLlmProvider::text_response("Default mock response")
             }
         }
+
+        fn supports_media(&self, _kind: crate::media::FfiMediaKind) -> bool {
+            false
+        }
     }
 
     // Helper to create a wrapper struct for ChatCallback forwarding
@@ -1231,6 +1235,10 @@ mod tests {
                     },
                     error: None,
                 }
+            }
+
+            fn supports_media(&self, _kind: crate::media::FfiMediaKind) -> bool {
+                false
             }
         }
 
