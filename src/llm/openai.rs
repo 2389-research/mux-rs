@@ -293,6 +293,11 @@ fn try_openai_messages(messages: &[Message]) -> Result<Vec<OpenAIMessage>, LlmEr
             .collect();
 
         if !tool_results.is_empty() {
+            if msg.content.len() != tool_results.len() {
+                return Err(LlmError::Configuration(
+                    "ToolResult blocks cannot be mixed with text, media, or tool calls in the same message".into(),
+                ));
+            }
             for (tool_use_id, content) in tool_results {
                 result.push(OpenAIMessage {
                     role: "tool".to_string(),
@@ -452,7 +457,14 @@ fn try_media_part(
         }
         MediaKind::Audio => {
             let data = match source {
-                MediaSource::Base64(data) => data.clone(),
+                MediaSource::Base64(data) => {
+                    if mime_type.is_empty() {
+                        return Err(LlmError::Configuration(
+                            "audio_base64 requires a non-empty mime_type".into(),
+                        ));
+                    }
+                    data.clone()
+                }
                 MediaSource::Url(_) | MediaSource::Path(_) => {
                     return Err(LlmError::Configuration(
                         "openai input_audio requires base64 data (URL/Path must be resolved)"
@@ -460,7 +472,7 @@ fn try_media_part(
                     ));
                 }
             };
-            let format = audio_format_from_mime(mime_type);
+            let format = audio_format_from_mime(mime_type)?;
             Ok(OpenAIContentPart::InputAudio {
                 input_audio: OpenAIInputAudio { data, format },
             })
@@ -472,15 +484,18 @@ fn try_media_part(
     }
 }
 
-fn audio_format_from_mime(mime: &str) -> String {
-    match mime {
-        "audio/wav" => "wav",
+fn audio_format_from_mime(mime: &str) -> Result<String, LlmError> {
+    let format = match mime {
+        "audio/wav" | "audio/x-wav" => "wav",
         "audio/mpeg" | "audio/mp3" => "mp3",
-        "audio/mp4" => "mp4",
-        "audio/webm" => "webm",
-        _ => mime.split('/').nth(1).unwrap_or("wav"),
-    }
-    .to_string()
+        _ => {
+            return Err(LlmError::Configuration(format!(
+                "unsupported input_audio mime_type: '{}' (only audio/wav, audio/x-wav, audio/mpeg, audio/mp3 accepted)",
+                mime
+            )));
+        }
+    };
+    Ok(format.to_string())
 }
 
 /// Check if a model requires max_completion_tokens instead of max_tokens.
@@ -949,6 +964,34 @@ mod openai_test {
         assert_eq!(json["messages"][0]["role"], "tool");
         assert_eq!(json["messages"][0]["tool_call_id"], "tu_1");
         assert_eq!(json["messages"][0]["content"], "Hello, Alice!");
+    }
+
+    #[test]
+    fn test_openai_mixed_tool_result_and_text_errors() {
+        let req = Request::new("gpt-4o").message(Message {
+            role: Role::User,
+            content: vec![
+                ContentBlock::text("accompanying note"),
+                ContentBlock::tool_result("tu_1", "result"),
+            ],
+        });
+        let result = try_into_openai_request(&req);
+        assert!(matches!(
+            result,
+            Err(crate::error::LlmError::Configuration(_))
+        ));
+    }
+
+    #[test]
+    fn test_openai_audio_unknown_mime_errors() {
+        let req = Request::new("gpt-4o-audio-preview").message(Message::user_with(vec![
+            ContentBlock::audio_base64("audio/ogg", "xxx"),
+        ]));
+        let result = try_into_openai_request(&req);
+        assert!(matches!(
+            result,
+            Err(crate::error::LlmError::Configuration(_))
+        ));
     }
 
     #[test]

@@ -24,22 +24,22 @@ fn estimate_media_tokens(kind: mux::llm::MediaKind, source: &mux::llm::MediaSour
     let bytes = approx_media_bytes(source);
     match kind {
         mux::llm::MediaKind::Image => 1000,
-        mux::llm::MediaKind::Document => (bytes / 4) as u32,
-        mux::llm::MediaKind::Audio => (bytes / 1000) as u32,
-        mux::llm::MediaKind::Video => (bytes / 500) as u32,
+        mux::llm::MediaKind::Document => bytes.map(|b| (b / 4) as u32).unwrap_or(512),
+        mux::llm::MediaKind::Audio => bytes.map(|b| (b / 1000) as u32).unwrap_or(256),
+        mux::llm::MediaKind::Video => bytes.map(|b| (b / 500) as u32).unwrap_or(768),
     }
 }
 
 /// Approximate the decoded byte size of a media source.
 ///
 /// Base64 strings inflate bytes by ~4/3, so decoded size is roughly
-/// `len * 3 / 4`. Url and Path sources return 0 because the bytes aren't
-/// available pre-flight; compaction estimates are computed before the
-/// provider-resolve step fetches/reads them.
-fn approx_media_bytes(source: &mux::llm::MediaSource) -> usize {
+/// `len * 3 / 4`. Url and Path sources return `None` because the bytes aren't
+/// available pre-flight; callers substitute a conservative fallback token
+/// floor so unresolved media isn't invisible to context-pressure checks.
+fn approx_media_bytes(source: &mux::llm::MediaSource) -> Option<usize> {
     match source {
-        mux::llm::MediaSource::Base64(data) => data.len() * 3 / 4,
-        mux::llm::MediaSource::Url(_) | mux::llm::MediaSource::Path(_) => 0,
+        mux::llm::MediaSource::Base64(data) => Some(data.len() * 3 / 4),
+        mux::llm::MediaSource::Url(_) | mux::llm::MediaSource::Path(_) => None,
     }
 }
 
@@ -567,10 +567,21 @@ mod token_estimate_tests {
     }
 
     #[test]
-    fn url_returns_zero_bytes_so_non_image_returns_zero() {
+    fn url_uses_fallback_tokens_for_non_image() {
         let s = MediaSource::Url("https://example.com/x.png".to_string());
-        assert_eq!(estimate_media_tokens(MediaKind::Document, &s), 0);
-        // Image still has the flat baseline regardless of source bytes
+        assert_eq!(estimate_media_tokens(MediaKind::Document, &s), 512);
         assert_eq!(estimate_media_tokens(MediaKind::Image, &s), 1000);
+    }
+
+    #[test]
+    fn url_and_path_use_fallback_floor() {
+        let url_src = MediaSource::Url("https://example.com/x.pdf".to_string());
+        let path_src = MediaSource::Path(std::path::PathBuf::from("/tmp/x.pdf"));
+        assert_eq!(estimate_media_tokens(MediaKind::Document, &url_src), 512);
+        assert_eq!(estimate_media_tokens(MediaKind::Document, &path_src), 512);
+        assert_eq!(estimate_media_tokens(MediaKind::Audio, &url_src), 256);
+        assert_eq!(estimate_media_tokens(MediaKind::Video, &url_src), 768);
+        // Image stays flat regardless
+        assert_eq!(estimate_media_tokens(MediaKind::Image, &url_src), 1000);
     }
 }

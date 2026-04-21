@@ -227,6 +227,12 @@ fn try_anthropic_content(block: &ContentBlock) -> Result<AnthropicContent, LlmEr
                         .into(),
                 ));
             }
+            if matches!(source, MediaSource::Base64(_)) && mime_type.is_empty() {
+                return Err(LlmError::Configuration(format!(
+                    "anthropic {} base64 media requires a non-empty mime_type",
+                    kind
+                )));
+            }
             let ant_source = match source {
                 MediaSource::Base64(data) => AnthropicSource::Base64 {
                     media_type: mime_type.clone(),
