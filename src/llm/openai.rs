@@ -2,7 +2,10 @@
 // ABOUTME: Implements LlmClient trait for GPT models.
 
 use super::client::StreamEvent;
-use super::{ContentBlock, Message, Request, Response, Role, StopReason, ToolDefinition, Usage};
+use super::{
+    ContentBlock, MediaKind, MediaSource, Message, Request, Response, Role, StopReason,
+    ToolDefinition, Usage,
+};
 use crate::error::LlmError;
 use async_trait::async_trait;
 use futures::Stream;
@@ -35,11 +38,40 @@ pub struct OpenAIRequest {
 pub struct OpenAIMessage {
     pub role: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub content: Option<String>,
+    pub content: Option<OpenAIContent>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<OpenAIToolCall>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
+}
+
+/// OpenAI message content: either a string (legacy) or an array of content parts (multimodal).
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum OpenAIContent {
+    String(String),
+    Parts(Vec<OpenAIContentPart>),
+}
+
+/// Content part for a multimodal message.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum OpenAIContentPart {
+    Text { text: String },
+    ImageUrl { image_url: OpenAIImageUrl },
+    InputFile { file_data: String },
+    InputAudio { input_audio: OpenAIInputAudio },
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct OpenAIImageUrl {
+    pub url: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct OpenAIInputAudio {
+    pub data: String,
+    pub format: String,
 }
 
 /// OpenAI tool call in a response.
@@ -232,76 +264,10 @@ impl From<&ToolDefinition> for OpenAITool {
     }
 }
 
-impl From<&Message> for OpenAIMessage {
-    fn from(msg: &Message) -> Self {
-        let role = match msg.role {
-            Role::User => "user",
-            Role::Assistant => "assistant",
-        };
-
-        // Check if this is a tool result message
-        let has_tool_results = msg
-            .content
-            .iter()
-            .any(|b| matches!(b, ContentBlock::ToolResult { .. }));
-
-        if has_tool_results {
-            // For tool results, we need to create multiple messages (handled separately)
-            // This branch shouldn't be hit directly
-            OpenAIMessage {
-                role: "tool".to_string(),
-                content: None,
-                tool_calls: None,
-                tool_call_id: None,
-            }
-        } else {
-            // Check for tool use blocks (assistant with tool calls)
-            let tool_calls: Vec<OpenAIToolCall> = msg
-                .content
-                .iter()
-                .filter_map(|b| match b {
-                    ContentBlock::ToolUse { id, name, input } => Some(OpenAIToolCall {
-                        id: id.clone(),
-                        call_type: "function".to_string(),
-                        function: OpenAIFunctionCall {
-                            name: name.clone(),
-                            arguments: serde_json::to_string(input).unwrap_or_default(),
-                        },
-                    }),
-                    _ => None,
-                })
-                .collect();
-
-            // Extract text content
-            let text: String = msg
-                .content
-                .iter()
-                .filter_map(|b| match b {
-                    ContentBlock::Text { text } => Some(text.as_str()),
-                    _ => None,
-                })
-                .collect::<Vec<_>>()
-                .join("");
-
-            OpenAIMessage {
-                role: role.to_string(),
-                content: if text.is_empty() { None } else { Some(text) },
-                tool_calls: if tool_calls.is_empty() {
-                    None
-                } else {
-                    Some(tool_calls)
-                },
-                tool_call_id: None,
-            }
-        }
-    }
-}
-
-fn convert_messages(messages: &[Message]) -> Vec<OpenAIMessage> {
+fn try_openai_messages(messages: &[Message]) -> Result<Vec<OpenAIMessage>, LlmError> {
     let mut result = Vec::new();
-
     for msg in messages {
-        // Check if this message contains tool results
+        // Split out tool-result blocks — each becomes its own `role: "tool"` message
         let tool_results: Vec<_> = msg
             .content
             .iter()
@@ -316,21 +282,180 @@ fn convert_messages(messages: &[Message]) -> Vec<OpenAIMessage> {
             .collect();
 
         if !tool_results.is_empty() {
-            // Create separate messages for each tool result
             for (tool_use_id, content) in tool_results {
                 result.push(OpenAIMessage {
                     role: "tool".to_string(),
-                    content: Some(content),
+                    content: Some(OpenAIContent::String(content)),
                     tool_calls: None,
                     tool_call_id: Some(tool_use_id),
                 });
             }
-        } else {
-            result.push(OpenAIMessage::from(msg));
+            continue;
         }
-    }
 
-    result
+        // For non-tool-result messages: build content (string or parts) + tool_calls
+        let role = match msg.role {
+            Role::User => "user",
+            Role::Assistant => "assistant",
+        }
+        .to_string();
+
+        let has_media = msg
+            .content
+            .iter()
+            .any(|b| matches!(b, ContentBlock::Media { .. }));
+
+        let tool_calls: Vec<OpenAIToolCall> = msg
+            .content
+            .iter()
+            .filter_map(|b| match b {
+                ContentBlock::ToolUse { id, name, input } => Some(OpenAIToolCall {
+                    id: id.clone(),
+                    call_type: "function".to_string(),
+                    function: OpenAIFunctionCall {
+                        name: name.clone(),
+                        arguments: serde_json::to_string(input).unwrap_or_default(),
+                    },
+                }),
+                _ => None,
+            })
+            .collect();
+
+        let content = if has_media {
+            // Build parts array
+            let mut parts: Vec<OpenAIContentPart> = Vec::new();
+            for block in &msg.content {
+                match block {
+                    ContentBlock::Text { text } => {
+                        parts.push(OpenAIContentPart::Text { text: text.clone() });
+                    }
+                    ContentBlock::Media {
+                        kind,
+                        source,
+                        mime_type,
+                    } => {
+                        parts.push(try_media_part(*kind, source, mime_type)?);
+                    }
+                    // ToolUse is handled by the tool_calls field above; skip here
+                    ContentBlock::ToolUse { .. } => {}
+                    ContentBlock::ToolResult { .. } => {
+                        // Shouldn't be reachable here (tool results are split above)
+                        return Err(LlmError::Configuration(
+                            "ToolResult mixed with non-tool-result content in same message".into(),
+                        ));
+                    }
+                }
+            }
+            Some(OpenAIContent::Parts(parts))
+        } else {
+            // Collect text only
+            let text: String = msg
+                .content
+                .iter()
+                .filter_map(|b| match b {
+                    ContentBlock::Text { text } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("");
+            if text.is_empty() {
+                None
+            } else {
+                Some(OpenAIContent::String(text))
+            }
+        };
+
+        result.push(OpenAIMessage {
+            role,
+            content,
+            tool_calls: if tool_calls.is_empty() {
+                None
+            } else {
+                Some(tool_calls)
+            },
+            tool_call_id: None,
+        });
+    }
+    Ok(result)
+}
+
+fn try_media_part(
+    kind: MediaKind,
+    source: &MediaSource,
+    mime_type: &str,
+) -> Result<OpenAIContentPart, LlmError> {
+    match kind {
+        MediaKind::Image => {
+            let url = match source {
+                MediaSource::Base64(data) => {
+                    if mime_type.is_empty() {
+                        return Err(LlmError::Configuration(
+                            "image_base64 requires a non-empty mime_type".into(),
+                        ));
+                    }
+                    format!("data:{};base64,{}", mime_type, data)
+                }
+                MediaSource::Url(url) => url.clone(),
+                MediaSource::Path(_) => {
+                    return Err(LlmError::Configuration(
+                        "MediaSource::Path must be resolved before serialization".into(),
+                    ));
+                }
+            };
+            Ok(OpenAIContentPart::ImageUrl {
+                image_url: OpenAIImageUrl { url },
+            })
+        }
+        MediaKind::Document => {
+            let data = match source {
+                MediaSource::Base64(data) => data.clone(),
+                MediaSource::Url(_) => {
+                    // OpenAI's input_file does NOT accept URLs; only file_data (base64) or file_id.
+                    // file_id belongs to the Files API — out of scope for this task.
+                    return Err(LlmError::Configuration(
+                        "openai input_file requires base64 data; URL sources are not supported"
+                            .into(),
+                    ));
+                }
+                MediaSource::Path(_) => {
+                    return Err(LlmError::Configuration(
+                        "MediaSource::Path must be resolved before serialization".into(),
+                    ));
+                }
+            };
+            Ok(OpenAIContentPart::InputFile { file_data: data })
+        }
+        MediaKind::Audio => {
+            let data = match source {
+                MediaSource::Base64(data) => data.clone(),
+                MediaSource::Url(_) | MediaSource::Path(_) => {
+                    return Err(LlmError::Configuration(
+                        "openai input_audio requires base64 data (URL/Path must be resolved)"
+                            .into(),
+                    ));
+                }
+            };
+            let format = audio_format_from_mime(mime_type);
+            Ok(OpenAIContentPart::InputAudio {
+                input_audio: OpenAIInputAudio { data, format },
+            })
+        }
+        MediaKind::Video => Err(LlmError::UnsupportedMedia {
+            provider: "openai",
+            kind: MediaKind::Video,
+        }),
+    }
+}
+
+fn audio_format_from_mime(mime: &str) -> String {
+    match mime {
+        "audio/wav" => "wav",
+        "audio/mpeg" | "audio/mp3" => "mp3",
+        "audio/mp4" => "mp4",
+        "audio/webm" => "webm",
+        _ => mime.split('/').nth(1).unwrap_or("wav"),
+    }
+    .to_string()
 }
 
 /// Check if a model requires max_completion_tokens instead of max_tokens.
@@ -341,39 +466,47 @@ fn uses_max_completion_tokens(model: &str) -> bool {
         || model_lower.starts_with("gpt-5")
 }
 
+pub fn try_into_openai_request(req: &Request) -> Result<OpenAIRequest, LlmError> {
+    let mut messages: Vec<OpenAIMessage> = Vec::new();
+
+    if let Some(system) = req.system.as_ref() {
+        messages.push(OpenAIMessage {
+            role: "system".to_string(),
+            content: Some(OpenAIContent::String(system.clone())),
+            tool_calls: None,
+            tool_call_id: None,
+        });
+    }
+
+    messages.extend(try_openai_messages(&req.messages)?);
+
+    let (max_tokens, max_completion_tokens) = if uses_max_completion_tokens(&req.model) {
+        (None, req.max_tokens)
+    } else {
+        (req.max_tokens, None)
+    };
+
+    Ok(OpenAIRequest {
+        model: req.model.clone(),
+        messages,
+        max_tokens,
+        max_completion_tokens,
+        temperature: req.temperature,
+        tools: req.tools.iter().map(OpenAITool::from).collect(),
+        stream: None,
+    })
+}
+
+/// Backward-compatible infallible converter used by OpenRouter and Ollama.
+///
+/// Delegates to `try_into_openai_request`. Panics on any conversion error;
+/// callers that can produce media (which may fail) should use the fallible
+/// entry point directly. Kept so the OpenAI-compatible wrappers (Ollama,
+/// OpenRouter) continue to build until they migrate to the fallible path.
 impl From<&Request> for OpenAIRequest {
     fn from(req: &Request) -> Self {
-        let mut messages = Vec::new();
-
-        // Add system message if present
-        if let Some(ref system) = req.system {
-            messages.push(OpenAIMessage {
-                role: "system".to_string(),
-                content: Some(system.clone()),
-                tool_calls: None,
-                tool_call_id: None,
-            });
-        }
-
-        // Convert conversation messages
-        messages.extend(convert_messages(&req.messages));
-
-        // Newer reasoning models use max_completion_tokens instead of max_tokens
-        let (max_tokens, max_completion_tokens) = if uses_max_completion_tokens(&req.model) {
-            (None, req.max_tokens)
-        } else {
-            (req.max_tokens, None)
-        };
-
-        OpenAIRequest {
-            model: req.model.clone(),
-            messages,
-            max_tokens,
-            max_completion_tokens,
-            temperature: req.temperature,
-            tools: req.tools.iter().map(OpenAITool::from).collect(),
-            stream: None,
-        }
+        try_into_openai_request(req)
+            .expect("OpenAIRequest::from cannot convert media; use try_into_openai_request")
     }
 }
 
@@ -440,6 +573,25 @@ impl From<OpenAIResponse> for Response {
     }
 }
 
+async fn resolve_request_media(req: &Request, http: &reqwest::Client) -> Result<Request, LlmError> {
+    use crate::llm::media::resolve_to_base64;
+    let mut out = req.clone();
+    for msg in out.messages.iter_mut() {
+        for block in msg.content.iter_mut() {
+            if let ContentBlock::Media {
+                source, mime_type, ..
+            } = block
+                && matches!(source, MediaSource::Path(_))
+            {
+                let (data, mime) = resolve_to_base64(source, mime_type, http).await?;
+                *source = MediaSource::Base64(data);
+                *mime_type = mime;
+            }
+        }
+    }
+    Ok(out)
+}
+
 /// Parse an SSE line into an OpenAI stream chunk.
 /// Used internally by OpenAI-compatible clients.
 pub fn parse_sse_line(line: &str) -> Option<OpenAIStreamChunk> {
@@ -453,7 +605,8 @@ pub fn parse_sse_line(line: &str) -> Option<OpenAIStreamChunk> {
 #[async_trait]
 impl super::client::LlmClient for OpenAIClient {
     async fn create_message(&self, req: &Request) -> Result<Response, LlmError> {
-        let openai_req = OpenAIRequest::from(req);
+        let resolved = resolve_request_media(req, &self.http).await?;
+        let openai_req = try_into_openai_request(&resolved)?;
         let url = format!("{}/chat/completions", self.base_url);
 
         let response = self
@@ -482,14 +635,16 @@ impl super::client::LlmClient for OpenAIClient {
         &self,
         req: &Request,
     ) -> Pin<Box<dyn Stream<Item = Result<StreamEvent, LlmError>> + Send + 'static>> {
-        let mut openai_req = OpenAIRequest::from(req);
-        openai_req.stream = Some(true);
-
         let api_key = self.api_key.clone();
         let base_url = self.base_url.clone();
         let http = self.http.clone();
+        let req = req.clone();
 
         Box::pin(async_stream::try_stream! {
+            let resolved = resolve_request_media(&req, &http).await?;
+            let mut openai_req = try_into_openai_request(&resolved)?;
+            openai_req.stream = Some(true);
+
             let url = format!("{}/chat/completions", base_url);
             let response = http
                 .post(&url)
@@ -632,6 +787,14 @@ impl super::client::LlmClient for OpenAIClient {
             }
         })
     }
+
+    fn supports_media(&self, kind: super::MediaKind) -> bool {
+        use super::MediaKind;
+        matches!(
+            kind,
+            MediaKind::Image | MediaKind::Document | MediaKind::Audio
+        )
+    }
 }
 
 #[cfg(test)]
@@ -678,5 +841,126 @@ mod openai_test {
         let openai_tool = OpenAITool::from(&tool);
         assert_eq!(openai_tool.tool_type, "function");
         assert_eq!(openai_tool.function.name, "get_weather");
+    }
+
+    #[test]
+    fn test_openai_image_base64_becomes_data_url() {
+        let req = Request::new("gpt-4o").message(Message::user_with(vec![
+            ContentBlock::text("what?"),
+            ContentBlock::image_base64("image/png", "aGVsbG8="),
+        ]));
+        let oa = try_into_openai_request(&req).unwrap();
+        let json = serde_json::to_value(&oa).unwrap();
+        let content = &json["messages"][0]["content"];
+        assert!(
+            content.is_array(),
+            "content should be parts array when media is present"
+        );
+        assert_eq!(content[0]["type"], "text");
+        assert_eq!(content[0]["text"], "what?");
+        assert_eq!(content[1]["type"], "image_url");
+        let url = content[1]["image_url"]["url"].as_str().unwrap();
+        assert!(
+            url.starts_with("data:image/png;base64,"),
+            "got url: {}",
+            url
+        );
+        assert!(url.ends_with("aGVsbG8="));
+    }
+
+    #[test]
+    fn test_openai_image_url_passthrough() {
+        let req =
+            Request::new("gpt-4o").message(Message::user_with(vec![ContentBlock::image_url(
+                "https://example.com/cat.png",
+            )]));
+        let oa = try_into_openai_request(&req).unwrap();
+        let json = serde_json::to_value(&oa).unwrap();
+        assert_eq!(
+            json["messages"][0]["content"][0]["image_url"]["url"],
+            "https://example.com/cat.png"
+        );
+    }
+
+    #[test]
+    fn test_openai_document_as_input_file() {
+        let req = Request::new("gpt-4o").message(Message::user_with(vec![
+            ContentBlock::document_base64("application/pdf", "JVBERi0="),
+        ]));
+        let oa = try_into_openai_request(&req).unwrap();
+        let json = serde_json::to_value(&oa).unwrap();
+        let part = &json["messages"][0]["content"][0];
+        assert_eq!(part["type"], "input_file");
+        assert_eq!(part["file_data"], "JVBERi0=");
+    }
+
+    #[test]
+    fn test_openai_audio_with_format_inference() {
+        let req = Request::new("gpt-4o-audio-preview").message(Message::user_with(vec![
+            ContentBlock::audio_base64("audio/wav", "UklGR"),
+        ]));
+        let oa = try_into_openai_request(&req).unwrap();
+        let json = serde_json::to_value(&oa).unwrap();
+        let part = &json["messages"][0]["content"][0];
+        assert_eq!(part["type"], "input_audio");
+        assert_eq!(part["input_audio"]["data"], "UklGR");
+        assert_eq!(part["input_audio"]["format"], "wav");
+    }
+
+    #[test]
+    fn test_openai_video_errors() {
+        let req =
+            Request::new("gpt-4o").message(Message::user_with(vec![ContentBlock::video_base64(
+                "video/mp4",
+                "AAAAG",
+            )]));
+        let result = try_into_openai_request(&req);
+        assert!(matches!(
+            result,
+            Err(crate::error::LlmError::UnsupportedMedia {
+                kind: MediaKind::Video,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn test_openai_text_only_keeps_string_content() {
+        // Ensure we don't regress backwards compat for pure-text messages.
+        let req = Request::new("gpt-4o").message(Message::user("hello"));
+        let oa = try_into_openai_request(&req).unwrap();
+        let json = serde_json::to_value(&oa).unwrap();
+        assert!(
+            json["messages"][0]["content"].is_string(),
+            "expected string content when no media present; got {:?}",
+            json["messages"][0]["content"]
+        );
+        assert_eq!(json["messages"][0]["content"], "hello");
+    }
+
+    #[test]
+    fn test_openai_tool_result_message_preserved() {
+        // Tool result messages use the legacy {"role":"tool","content":"...","tool_call_id":"..."} shape.
+        // Ensure that path still works after the refactor.
+        let req =
+            Request::new("gpt-4o").message(Message::tool_results(vec![ContentBlock::tool_result(
+                "tu_1",
+                "Hello, Alice!",
+            )]));
+        let oa = try_into_openai_request(&req).unwrap();
+        let json = serde_json::to_value(&oa).unwrap();
+        assert_eq!(json["messages"][0]["role"], "tool");
+        assert_eq!(json["messages"][0]["tool_call_id"], "tu_1");
+        assert_eq!(json["messages"][0]["content"], "Hello, Alice!");
+    }
+
+    #[test]
+    fn test_openai_supports_media() {
+        use super::super::client::LlmClient;
+        let c = OpenAIClient::new("fake");
+        assert!(c.supports_media(MediaKind::Image));
+        assert!(c.supports_media(MediaKind::Document));
+        assert!(c.supports_media(MediaKind::Audio));
+        assert!(!c.supports_media(MediaKind::Video));
     }
 }
