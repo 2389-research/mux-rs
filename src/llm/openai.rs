@@ -2,6 +2,7 @@
 // ABOUTME: Implements LlmClient trait for GPT models.
 
 use super::client::StreamEvent;
+use super::media::resolve_request_media;
 use super::{
     ContentBlock, MediaKind, MediaSource, Message, Request, Response, Role, StopReason,
     ToolDefinition, Usage,
@@ -571,25 +572,6 @@ impl From<OpenAIResponse> for Response {
             },
         }
     }
-}
-
-async fn resolve_request_media(req: &Request, http: &reqwest::Client) -> Result<Request, LlmError> {
-    use crate::llm::media::resolve_to_base64;
-    let mut out = req.clone();
-    for msg in out.messages.iter_mut() {
-        for block in msg.content.iter_mut() {
-            if let ContentBlock::Media {
-                source, mime_type, ..
-            } = block
-                && matches!(source, MediaSource::Path(_))
-            {
-                let (data, mime) = resolve_to_base64(source, mime_type, http).await?;
-                *source = MediaSource::Base64(data);
-                *mime_type = mime;
-            }
-        }
-    }
-    Ok(out)
 }
 
 /// Parse an SSE line into an OpenAI stream chunk.

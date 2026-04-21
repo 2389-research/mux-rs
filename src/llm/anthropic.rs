@@ -2,6 +2,7 @@
 // ABOUTME: Implements LlmClient trait for Claude models.
 
 use super::client::StreamEvent;
+use super::media::resolve_request_media;
 use super::{ContentBlock, Message, Request, Response, StopReason, ToolDefinition, Usage};
 use crate::error::LlmError;
 use async_trait::async_trait;
@@ -341,25 +342,6 @@ pub fn try_into_anthropic_request(req: &Request) -> Result<AnthropicRequest, Llm
         tools: req.tools.iter().map(AnthropicTool::from).collect(),
         stream: None,
     })
-}
-
-async fn resolve_request_media(req: &Request, http: &reqwest::Client) -> Result<Request, LlmError> {
-    use crate::llm::{MediaSource, media::resolve_to_base64};
-    let mut out = req.clone();
-    for msg in out.messages.iter_mut() {
-        for block in msg.content.iter_mut() {
-            if let ContentBlock::Media {
-                source, mime_type, ..
-            } = block
-                && matches!(source, MediaSource::Path(_))
-            {
-                let (data, mime) = resolve_to_base64(source, mime_type, http).await?;
-                *source = MediaSource::Base64(data);
-                *mime_type = mime;
-            }
-        }
-    }
-    Ok(out)
 }
 
 fn parse_stop_reason(s: &str) -> StopReason {

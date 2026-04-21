@@ -77,6 +77,34 @@ fn mime_from_ext(ext: &str) -> String {
     .to_string()
 }
 
+/// Walk a request, replacing any `MediaSource::Path` with `MediaSource::Base64`
+/// by reading the file from disk and encoding.
+///
+/// Returns a new `Request` — caller's copy is unchanged. Paths are the only
+/// variant resolved; URLs pass through unchanged (providers that need base64
+/// for URL sources should handle that inside their serialization).
+pub async fn resolve_request_media(
+    req: &crate::llm::Request,
+    http: &reqwest::Client,
+) -> Result<crate::llm::Request, LlmError> {
+    use crate::llm::{ContentBlock, MediaSource};
+    let mut out = req.clone();
+    for msg in out.messages.iter_mut() {
+        for block in msg.content.iter_mut() {
+            if let ContentBlock::Media {
+                source, mime_type, ..
+            } = block
+                && matches!(source, MediaSource::Path(_))
+            {
+                let (data, mime) = resolve_to_base64(source, mime_type, http).await?;
+                *source = MediaSource::Base64(data);
+                *mime_type = mime;
+            }
+        }
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
