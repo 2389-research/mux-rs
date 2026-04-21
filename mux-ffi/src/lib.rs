@@ -24,6 +24,9 @@ pub use callback_client::*;
 mod context;
 pub use context::*;
 
+mod media;
+pub use media::*;
+
 #[derive(Debug, thiserror::Error, uniffi::Error)]
 pub enum MuxFfiError {
     #[error("Engine error: {message}")]
