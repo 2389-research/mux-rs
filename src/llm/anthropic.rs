@@ -35,6 +35,14 @@ pub struct AnthropicMessage {
     pub content: Vec<AnthropicContent>,
 }
 
+/// Anthropic image/document source block. Either base64 or URL.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum AnthropicSource {
+    Base64 { media_type: String, data: String },
+    Url { url: String },
+}
+
 /// Anthropic content block.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -52,6 +60,12 @@ pub enum AnthropicContent {
         content: String,
         #[serde(default)]
         is_error: bool,
+    },
+    Image {
+        source: AnthropicSource,
+    },
+    Document {
+        source: AnthropicSource,
     },
 }
 
@@ -182,31 +196,60 @@ impl AnthropicClient {
     }
 }
 
-impl From<&ContentBlock> for AnthropicContent {
-    fn from(block: &ContentBlock) -> Self {
-        match block {
-            ContentBlock::Text { text } => AnthropicContent::Text { text: text.clone() },
-            ContentBlock::ToolUse { id, name, input } => AnthropicContent::ToolUse {
-                id: id.clone(),
-                name: name.clone(),
-                input: input.clone(),
-            },
-            ContentBlock::ToolResult {
-                tool_use_id,
-                content,
-                is_error,
-            } => AnthropicContent::ToolResult {
-                tool_use_id: tool_use_id.clone(),
-                content: content.clone(),
-                is_error: *is_error,
-            },
-            ContentBlock::Media { .. } => todo!("Media handling in later task"),
+fn try_anthropic_content(block: &ContentBlock) -> Result<AnthropicContent, LlmError> {
+    use crate::llm::{MediaKind, MediaSource};
+    match block {
+        ContentBlock::Text { text } => Ok(AnthropicContent::Text { text: text.clone() }),
+        ContentBlock::ToolUse { id, name, input } => Ok(AnthropicContent::ToolUse {
+            id: id.clone(),
+            name: name.clone(),
+            input: input.clone(),
+        }),
+        ContentBlock::ToolResult {
+            tool_use_id,
+            content,
+            is_error,
+        } => Ok(AnthropicContent::ToolResult {
+            tool_use_id: tool_use_id.clone(),
+            content: content.clone(),
+            is_error: *is_error,
+        }),
+        ContentBlock::Media {
+            kind,
+            source,
+            mime_type,
+        } => {
+            let ant_source = match source {
+                MediaSource::Base64(data) => AnthropicSource::Base64 {
+                    media_type: mime_type.clone(),
+                    data: data.clone(),
+                },
+                MediaSource::Url(url) => AnthropicSource::Url { url: url.clone() },
+                MediaSource::Path(_) => {
+                    return Err(LlmError::Configuration(
+                        "MediaSource::Path must be resolved before serialization".into(),
+                    ));
+                }
+            };
+            match kind {
+                MediaKind::Image => Ok(AnthropicContent::Image { source: ant_source }),
+                MediaKind::Document => Ok(AnthropicContent::Document { source: ant_source }),
+                MediaKind::Audio => Err(LlmError::UnsupportedMedia {
+                    provider: "anthropic",
+                    kind: MediaKind::Audio,
+                }),
+                MediaKind::Video => Err(LlmError::UnsupportedMedia {
+                    provider: "anthropic",
+                    kind: MediaKind::Video,
+                }),
+            }
         }
     }
 }
 
 impl From<AnthropicContent> for ContentBlock {
     fn from(content: AnthropicContent) -> Self {
+        use crate::llm::{MediaKind, MediaSource};
         match content {
             AnthropicContent::Text { text } => ContentBlock::Text { text },
             AnthropicContent::ToolUse { id, name, input } => {
@@ -221,20 +264,49 @@ impl From<AnthropicContent> for ContentBlock {
                 content,
                 is_error,
             },
+            AnthropicContent::Image { source } => {
+                let (mime_type, src) = match source {
+                    AnthropicSource::Base64 { media_type, data } => {
+                        (media_type, MediaSource::Base64(data))
+                    }
+                    AnthropicSource::Url { url } => (String::new(), MediaSource::Url(url)),
+                };
+                ContentBlock::Media {
+                    kind: MediaKind::Image,
+                    source: src,
+                    mime_type,
+                }
+            }
+            AnthropicContent::Document { source } => {
+                let (mime_type, src) = match source {
+                    AnthropicSource::Base64 { media_type, data } => {
+                        (media_type, MediaSource::Base64(data))
+                    }
+                    AnthropicSource::Url { url } => (String::new(), MediaSource::Url(url)),
+                };
+                ContentBlock::Media {
+                    kind: MediaKind::Document,
+                    source: src,
+                    mime_type,
+                }
+            }
         }
     }
 }
 
-impl From<&Message> for AnthropicMessage {
-    fn from(msg: &Message) -> Self {
-        AnthropicMessage {
-            role: match msg.role {
-                super::Role::User => "user".to_string(),
-                super::Role::Assistant => "assistant".to_string(),
-            },
-            content: msg.content.iter().map(AnthropicContent::from).collect(),
-        }
-    }
+pub(super) fn try_anthropic_message(msg: &Message) -> Result<AnthropicMessage, LlmError> {
+    let content: Vec<AnthropicContent> = msg
+        .content
+        .iter()
+        .map(try_anthropic_content)
+        .collect::<Result<_, _>>()?;
+    Ok(AnthropicMessage {
+        role: match msg.role {
+            super::Role::User => "user".to_string(),
+            super::Role::Assistant => "assistant".to_string(),
+        },
+        content,
+    })
 }
 
 impl From<&ToolDefinition> for AnthropicTool {
@@ -247,18 +319,40 @@ impl From<&ToolDefinition> for AnthropicTool {
     }
 }
 
-impl From<&Request> for AnthropicRequest {
-    fn from(req: &Request) -> Self {
-        AnthropicRequest {
-            model: req.model.clone(),
-            messages: req.messages.iter().map(AnthropicMessage::from).collect(),
-            max_tokens: req.max_tokens.unwrap_or(4096),
-            system: req.system.clone(),
-            temperature: req.temperature,
-            tools: req.tools.iter().map(AnthropicTool::from).collect(),
-            stream: None,
+pub fn try_into_anthropic_request(req: &Request) -> Result<AnthropicRequest, LlmError> {
+    let messages: Vec<AnthropicMessage> = req
+        .messages
+        .iter()
+        .map(try_anthropic_message)
+        .collect::<Result<_, _>>()?;
+    Ok(AnthropicRequest {
+        model: req.model.clone(),
+        messages,
+        max_tokens: req.max_tokens.unwrap_or(4096),
+        system: req.system.clone(),
+        temperature: req.temperature,
+        tools: req.tools.iter().map(AnthropicTool::from).collect(),
+        stream: None,
+    })
+}
+
+async fn resolve_request_media(req: &Request, http: &reqwest::Client) -> Result<Request, LlmError> {
+    use crate::llm::{MediaSource, media::resolve_to_base64};
+    let mut out = req.clone();
+    for msg in out.messages.iter_mut() {
+        for block in msg.content.iter_mut() {
+            if let ContentBlock::Media {
+                source, mime_type, ..
+            } = block
+                && matches!(source, MediaSource::Path(_))
+            {
+                let (data, mime) = resolve_to_base64(source, mime_type, http).await?;
+                *source = MediaSource::Base64(data);
+                *mime_type = mime;
+            }
         }
     }
+    Ok(out)
 }
 
 fn parse_stop_reason(s: &str) -> StopReason {
@@ -343,7 +437,8 @@ fn parse_sse_event(event_str: &str) -> Option<StreamEvent> {
 #[async_trait]
 impl super::client::LlmClient for AnthropicClient {
     async fn create_message(&self, req: &Request) -> Result<Response, LlmError> {
-        let anthropic_req = AnthropicRequest::from(req);
+        let resolved = resolve_request_media(req, &self.http).await?;
+        let anthropic_req = try_into_anthropic_request(&resolved)?;
 
         let url = format!("{}/v1/messages", self.base_url);
         let response = self
@@ -373,14 +468,16 @@ impl super::client::LlmClient for AnthropicClient {
         &self,
         req: &Request,
     ) -> Pin<Box<dyn Stream<Item = Result<StreamEvent, LlmError>> + Send + 'static>> {
-        let mut anthropic_req = AnthropicRequest::from(req);
-        anthropic_req.stream = Some(true);
-
         let api_key = self.api_key.clone();
         let base_url = self.base_url.clone();
         let http = self.http.clone();
+        let req = req.clone();
 
         Box::pin(async_stream::try_stream! {
+            let resolved = resolve_request_media(&req, &http).await?;
+            let mut anthropic_req = try_into_anthropic_request(&resolved)?;
+            anthropic_req.stream = Some(true);
+
             let url = format!("{}/v1/messages", base_url);
             let response = http
                 .post(&url)
@@ -420,5 +517,10 @@ impl super::client::LlmClient for AnthropicClient {
                 }
             }
         })
+    }
+
+    fn supports_media(&self, kind: super::MediaKind) -> bool {
+        use super::MediaKind;
+        matches!(kind, MediaKind::Image | MediaKind::Document)
     }
 }
