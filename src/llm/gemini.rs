@@ -672,7 +672,7 @@ mod tests {
 #[cfg(test)]
 mod gemini_test {
     use super::*;
-    use crate::llm::{ContentBlock, LlmClient, MediaKind, Message, Request};
+    use crate::llm::{ContentBlock, LlmClient, MediaKind, Message, Request, Role};
 
     #[test]
     fn test_gemini_image_base64_serialization() {
@@ -739,5 +739,50 @@ mod gemini_test {
         assert!(c.supports_media(MediaKind::Document));
         assert!(c.supports_media(MediaKind::Audio));
         assert!(c.supports_media(MediaKind::Video));
+    }
+
+    #[test]
+    fn test_gemini_assistant_role_maps_to_model() {
+        let req = Request::new("gemini-1.5-flash").messages(vec![
+            Message::user("look"),
+            Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::text("sure")],
+            },
+        ]);
+        let gr = try_into_gemini_request(&req).unwrap();
+        let json = serde_json::to_value(&gr).unwrap();
+        assert_eq!(json["contents"][0]["role"], "user");
+        assert_eq!(json["contents"][1]["role"], "model");
+    }
+
+    #[test]
+    fn test_gemini_mixed_text_and_media_preserves_order() {
+        let req = Request::new("gemini-1.5-flash").message(Message::user_with(vec![
+            ContentBlock::text("first"),
+            ContentBlock::image_base64("image/png", "aGVsbG8="),
+            ContentBlock::text("last"),
+        ]));
+        let gr = try_into_gemini_request(&req).unwrap();
+        let json = serde_json::to_value(&gr).unwrap();
+        let parts = &json["contents"][0]["parts"];
+        assert_eq!(parts.as_array().unwrap().len(), 3);
+        assert_eq!(parts[0]["text"], "first");
+        assert_eq!(parts[1]["inlineData"]["mimeType"], "image/png");
+        assert_eq!(parts[2]["text"], "last");
+    }
+
+    #[test]
+    fn test_gemini_multiple_media_blocks_all_present() {
+        let req = Request::new("gemini-1.5-flash").message(Message::user_with(vec![
+            ContentBlock::image_base64("image/png", "aaaa"),
+            ContentBlock::audio_base64("audio/wav", "bbbb"),
+        ]));
+        let gr = try_into_gemini_request(&req).unwrap();
+        let json = serde_json::to_value(&gr).unwrap();
+        let parts = &json["contents"][0]["parts"];
+        assert_eq!(parts.as_array().unwrap().len(), 2);
+        assert_eq!(parts[0]["inlineData"]["mimeType"], "image/png");
+        assert_eq!(parts[1]["inlineData"]["mimeType"], "audio/wav");
     }
 }

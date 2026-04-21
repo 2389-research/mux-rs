@@ -77,6 +77,40 @@ fn mime_from_ext(ext: &str) -> String {
     .to_string()
 }
 
+#[derive(Copy, Clone)]
+enum ResolvePolicy {
+    PathsOnly,
+    PathsAndUrls,
+}
+
+async fn resolve_request_media_inner(
+    req: &crate::llm::Request,
+    http: &reqwest::Client,
+    policy: ResolvePolicy,
+) -> Result<crate::llm::Request, LlmError> {
+    use crate::llm::{ContentBlock, MediaSource};
+    let mut out = req.clone();
+    for msg in out.messages.iter_mut() {
+        for block in msg.content.iter_mut() {
+            if let ContentBlock::Media {
+                source, mime_type, ..
+            } = block
+            {
+                let should_resolve = !matches!(
+                    (policy, &*source),
+                    (_, MediaSource::Base64(_)) | (ResolvePolicy::PathsOnly, MediaSource::Url(_))
+                );
+                if should_resolve {
+                    let (data, mime) = resolve_to_base64(source, mime_type, http).await?;
+                    *source = MediaSource::Base64(data);
+                    *mime_type = mime;
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
 /// Walk a request, replacing any `MediaSource::Path` with `MediaSource::Base64`
 /// by reading the file from disk and encoding.
 ///
@@ -87,22 +121,7 @@ pub async fn resolve_request_media(
     req: &crate::llm::Request,
     http: &reqwest::Client,
 ) -> Result<crate::llm::Request, LlmError> {
-    use crate::llm::{ContentBlock, MediaSource};
-    let mut out = req.clone();
-    for msg in out.messages.iter_mut() {
-        for block in msg.content.iter_mut() {
-            if let ContentBlock::Media {
-                source, mime_type, ..
-            } = block
-                && matches!(source, MediaSource::Path(_))
-            {
-                let (data, mime) = resolve_to_base64(source, mime_type, http).await?;
-                *source = MediaSource::Base64(data);
-                *mime_type = mime;
-            }
-        }
-    }
-    Ok(out)
+    resolve_request_media_inner(req, http, ResolvePolicy::PathsOnly).await
 }
 
 /// Like `resolve_request_media`, but also fetches any `MediaSource::Url` and
@@ -112,22 +131,7 @@ pub async fn resolve_request_media_fully(
     req: &crate::llm::Request,
     http: &reqwest::Client,
 ) -> Result<crate::llm::Request, LlmError> {
-    use crate::llm::{ContentBlock, MediaSource};
-    let mut out = req.clone();
-    for msg in out.messages.iter_mut() {
-        for block in msg.content.iter_mut() {
-            if let ContentBlock::Media {
-                source, mime_type, ..
-            } = block
-                && !matches!(source, MediaSource::Base64(_))
-            {
-                let (data, mime) = resolve_to_base64(source, mime_type, http).await?;
-                *source = MediaSource::Base64(data);
-                *mime_type = mime;
-            }
-        }
-    }
-    Ok(out)
+    resolve_request_media_inner(req, http, ResolvePolicy::PathsAndUrls).await
 }
 
 #[cfg(test)]
