@@ -105,6 +105,31 @@ pub async fn resolve_request_media(
     Ok(out)
 }
 
+/// Like `resolve_request_media`, but also fetches any `MediaSource::Url` and
+/// inlines it as `Base64`. Use for providers (e.g. Gemini) that don't accept
+/// arbitrary URL sources natively.
+pub async fn resolve_request_media_fully(
+    req: &crate::llm::Request,
+    http: &reqwest::Client,
+) -> Result<crate::llm::Request, LlmError> {
+    use crate::llm::{ContentBlock, MediaSource};
+    let mut out = req.clone();
+    for msg in out.messages.iter_mut() {
+        for block in msg.content.iter_mut() {
+            if let ContentBlock::Media {
+                source, mime_type, ..
+            } = block
+                && !matches!(source, MediaSource::Base64(_))
+            {
+                let (data, mime) = resolve_to_base64(source, mime_type, http).await?;
+                *source = MediaSource::Base64(data);
+                *mime_type = mime;
+            }
+        }
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -173,5 +198,19 @@ mod tests {
             result.is_err(),
             "expected an error for an unreachable URL, got Ok"
         );
+    }
+
+    #[tokio::test]
+    async fn test_resolve_fully_errors_on_bad_url() {
+        use crate::llm::{ContentBlock, Message, Request};
+        let req = Request::new("x").message(Message::user_with(vec![ContentBlock::image_url(
+            "http://127.0.0.1:1/nonexistent",
+        )]));
+        let http = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(2))
+            .build()
+            .unwrap();
+        let result = resolve_request_media_fully(&req, &http).await;
+        assert!(result.is_err());
     }
 }
