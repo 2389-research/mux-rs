@@ -498,19 +498,6 @@ pub fn try_into_openai_request(req: &Request) -> Result<OpenAIRequest, LlmError>
     })
 }
 
-/// Backward-compatible infallible converter used by OpenRouter and Ollama.
-///
-/// Delegates to `try_into_openai_request`. Panics on any conversion error;
-/// callers that can produce media (which may fail) should use the fallible
-/// entry point directly. Kept so the OpenAI-compatible wrappers (Ollama,
-/// OpenRouter) continue to build until they migrate to the fallible path.
-impl From<&Request> for OpenAIRequest {
-    fn from(req: &Request) -> Self {
-        try_into_openai_request(req)
-            .expect("OpenAIRequest::from cannot convert media; use try_into_openai_request")
-    }
-}
-
 fn parse_stop_reason(s: Option<&str>) -> StopReason {
     match s {
         Some("stop") => StopReason::EndTurn,
@@ -800,7 +787,7 @@ mod openai_test {
             .system("Be helpful")
             .max_tokens(100);
 
-        let openai_req = OpenAIRequest::from(&req);
+        let openai_req = try_into_openai_request(&req).unwrap();
         assert_eq!(openai_req.model, "gpt-4o");
         assert_eq!(openai_req.messages.len(), 2); // system + user
         assert_eq!(openai_req.messages[0].role, "system");

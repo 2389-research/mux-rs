@@ -2,7 +2,7 @@
 // ABOUTME: Supports custom HTTP-Referer and X-Title headers for app identification.
 
 use super::client::StreamEvent;
-use super::openai::{OpenAIError, OpenAIRequest, OpenAIResponse, parse_sse_line};
+use super::openai::{OpenAIError, OpenAIResponse, parse_sse_line, try_into_openai_request};
 use super::{ContentBlock, Request, Response, StopReason, Usage};
 use crate::error::LlmError;
 use async_trait::async_trait;
@@ -96,7 +96,7 @@ fn parse_stop_reason(s: Option<&str>) -> StopReason {
 #[async_trait]
 impl super::client::LlmClient for OpenRouterClient {
     async fn create_message(&self, req: &Request) -> Result<Response, LlmError> {
-        let mut openai_req = OpenAIRequest::from(req);
+        let mut openai_req = try_into_openai_request(req)?;
 
         // Use default model if none specified
         if openai_req.model.is_empty() {
@@ -131,19 +131,21 @@ impl super::client::LlmClient for OpenRouterClient {
         &self,
         req: &Request,
     ) -> Pin<Box<dyn Stream<Item = Result<StreamEvent, LlmError>> + Send + 'static>> {
-        let mut openai_req = OpenAIRequest::from(req);
-
-        // Use default model if none specified
-        if openai_req.model.is_empty() {
-            openai_req.model = self.default_model.clone();
-        }
-
-        openai_req.stream = Some(true);
-
         let api_key = self.api_key.clone();
         let http = self.http.clone();
+        let default_model = self.default_model.clone();
+        let req = req.clone();
 
         Box::pin(async_stream::try_stream! {
+            let mut openai_req = try_into_openai_request(&req)?;
+
+            // Use default model if none specified
+            if openai_req.model.is_empty() {
+                openai_req.model = default_model;
+            }
+
+            openai_req.stream = Some(true);
+
             let url = format!("{}/chat/completions", OPENROUTER_BASE_URL);
             let response = http
                 .post(&url)
@@ -286,11 +288,29 @@ impl super::client::LlmClient for OpenRouterClient {
             }
         })
     }
+
+    fn supports_media(&self, kind: super::MediaKind) -> bool {
+        use super::MediaKind;
+        matches!(
+            kind,
+            MediaKind::Image | MediaKind::Document | MediaKind::Audio
+        )
+    }
 }
 
 #[cfg(test)]
 mod openrouter_test {
     use super::*;
+    use crate::llm::{LlmClient, MediaKind};
+
+    #[test]
+    fn test_openrouter_supports_media() {
+        let c = OpenRouterClient::new("fake");
+        assert!(c.supports_media(MediaKind::Image));
+        assert!(c.supports_media(MediaKind::Document));
+        assert!(c.supports_media(MediaKind::Audio));
+        assert!(!c.supports_media(MediaKind::Video));
+    }
 
     #[test]
     fn test_client_from_env_missing() {
