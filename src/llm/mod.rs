@@ -4,6 +4,7 @@
 mod anthropic;
 mod client;
 mod gemini;
+mod media;
 mod ollama;
 mod openai;
 mod openrouter;
@@ -13,6 +14,7 @@ mod types;
 pub use anthropic::*;
 pub use client::*;
 pub use gemini::*;
+pub use media::*;
 pub use ollama::*;
 pub use openai::*;
 pub use openrouter::*;
