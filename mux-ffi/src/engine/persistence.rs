@@ -150,3 +150,134 @@ impl MuxEngine {
         }
     }
 }
+
+#[cfg(test)]
+mod persistence_test {
+    use super::*;
+    use mux::llm::{ContentBlock, MediaKind, MediaSource, Role};
+
+    #[test]
+    fn test_stored_message_roundtrip_text_only() {
+        // Baseline — pre-existing behavior must still work.
+        let msg = StoredMessage {
+            role: Role::User,
+            content: vec![ContentBlock::text("hello")],
+        };
+        let json = serde_json::to_string(&vec![msg]).unwrap();
+        let back: Vec<StoredMessage> = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.len(), 1);
+        assert!(matches!(back[0].role, Role::User));
+    }
+
+    #[test]
+    fn test_stored_message_roundtrip_with_media() {
+        let msg = StoredMessage {
+            role: Role::User,
+            content: vec![
+                ContentBlock::text("look"),
+                ContentBlock::image_base64("image/png", "aGVsbG8="),
+            ],
+        };
+        let json = serde_json::to_string(&vec![msg]).unwrap();
+        let back: Vec<StoredMessage> = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.len(), 1);
+        assert_eq!(back[0].content.len(), 2);
+        match &back[0].content[1] {
+            ContentBlock::Media {
+                kind,
+                source,
+                mime_type,
+            } => {
+                assert_eq!(*kind, MediaKind::Image);
+                assert!(matches!(source, MediaSource::Base64(s) if s == "aGVsbG8="));
+                assert_eq!(mime_type, "image/png");
+            }
+            other => panic!("expected Media variant, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_stored_message_roundtrip_all_media_kinds() {
+        // Confirms all four MediaKind variants round-trip.
+        let msg = StoredMessage {
+            role: Role::User,
+            content: vec![
+                ContentBlock::image_base64("image/png", "i"),
+                ContentBlock::document_base64("application/pdf", "d"),
+                ContentBlock::audio_base64("audio/wav", "a"),
+                ContentBlock::video_base64("video/mp4", "v"),
+            ],
+        };
+        let json = serde_json::to_string(&vec![msg]).unwrap();
+        let back: Vec<StoredMessage> = serde_json::from_str(&json).unwrap();
+        let blocks = &back[0].content;
+        assert_eq!(blocks.len(), 4);
+        let kinds: Vec<MediaKind> = blocks
+            .iter()
+            .filter_map(|b| match b {
+                ContentBlock::Media { kind, .. } => Some(*kind),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            kinds,
+            vec![
+                MediaKind::Image,
+                MediaKind::Document,
+                MediaKind::Audio,
+                MediaKind::Video
+            ]
+        );
+    }
+
+    #[test]
+    fn test_legacy_no_media_conversation_still_loads() {
+        // A pre-Media conversation file with only Text + ToolUse + ToolResult blocks
+        // must still deserialize under the new code.
+        let json = r#"[
+            {"role":"user","content":[{"type":"text","text":"hi"}]},
+            {"role":"assistant","content":[{"type":"text","text":"hello"},{"type":"tool_use","id":"tu_1","name":"greet","input":{"name":"Alice"}}]},
+            {"role":"user","content":[{"type":"tool_result","tool_use_id":"tu_1","content":"Hello, Alice!","is_error":false}]}
+        ]"#;
+        let msgs: Vec<StoredMessage> = serde_json::from_str(json).unwrap();
+        assert_eq!(msgs.len(), 3);
+
+        // Spot-check structure
+        match &msgs[0].content[0] {
+            ContentBlock::Text { text } => assert_eq!(text, "hi"),
+            other => panic!("expected Text, got {:?}", other),
+        }
+        match &msgs[1].content[1] {
+            ContentBlock::ToolUse { id, name, .. } => {
+                assert_eq!(id, "tu_1");
+                assert_eq!(name, "greet");
+            }
+            other => panic!("expected ToolUse, got {:?}", other),
+        }
+        match &msgs[2].content[0] {
+            ContentBlock::ToolResult {
+                content, is_error, ..
+            } => {
+                assert_eq!(content, "Hello, Alice!");
+                assert!(!is_error);
+            }
+            other => panic!("expected ToolResult, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_legacy_string_content_migration() {
+        // The LegacyStoredMessage path converts `{role, content: "..."}` (pre-v0.6.2)
+        // to `StoredMessage { role, content: vec![Text] }`.
+        let legacy_json = r#"{"role":"user","content":"plain old text"}"#;
+        // Deserialize as the legacy shape (needs to target LegacyStoredMessage)
+        let legacy: LegacyStoredMessage = serde_json::from_str(legacy_json).unwrap();
+        let migrated: StoredMessage = legacy.into();
+        assert!(matches!(migrated.role, Role::User));
+        assert_eq!(migrated.content.len(), 1);
+        match &migrated.content[0] {
+            ContentBlock::Text { text } => assert_eq!(text, "plain old text"),
+            other => panic!("expected Text, got {:?}", other),
+        }
+    }
+}
