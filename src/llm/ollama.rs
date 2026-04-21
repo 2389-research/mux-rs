@@ -2,6 +2,7 @@
 // ABOUTME: Connects to Ollama server (default localhost:11434) with dummy API key.
 
 use super::client::StreamEvent;
+use super::media::resolve_request_media;
 use super::openai::{OpenAIError, OpenAIResponse, parse_sse_line, try_into_openai_request};
 use super::{ContentBlock, Request, Response, StopReason, Usage};
 use crate::error::LlmError;
@@ -105,7 +106,8 @@ fn reject_non_image_media(req: &Request) -> Result<(), LlmError> {
 impl super::client::LlmClient for OllamaClient {
     async fn create_message(&self, req: &Request) -> Result<Response, LlmError> {
         reject_non_image_media(req)?;
-        let mut openai_req = try_into_openai_request(req)?;
+        let resolved = resolve_request_media(req, &self.http).await?;
+        let mut openai_req = try_into_openai_request(&resolved)?;
 
         // Use default model if none specified
         if openai_req.model.is_empty() {
@@ -148,7 +150,8 @@ impl super::client::LlmClient for OllamaClient {
 
         Box::pin(async_stream::try_stream! {
             reject_non_image_media(&req)?;
-            let mut openai_req = try_into_openai_request(&req)?;
+            let resolved = resolve_request_media(&req, &http).await?;
+            let mut openai_req = try_into_openai_request(&resolved)?;
 
             // Use default model if none specified
             if openai_req.model.is_empty() {
@@ -417,5 +420,20 @@ mod ollama_test {
     fn test_constants() {
         assert_eq!(OLLAMA_BASE_URL, "http://localhost:11434/v1");
         assert_eq!(OLLAMA_DEFAULT_MODEL, "llama3.2");
+    }
+
+    #[tokio::test]
+    async fn test_ollama_resolves_image_path() {
+        let c = OllamaClient::new("llava");
+        let req =
+            Request::new("llava").message(Message::user_with(vec![ContentBlock::image_path(
+                std::path::PathBuf::from("/nonexistent/path/image.png"),
+            )]));
+        let result = c.create_message(&req).await;
+        assert!(
+            matches!(result, Err(crate::error::LlmError::Io(_))),
+            "expected Io error for missing file, got {:?}",
+            result
+        );
     }
 }
