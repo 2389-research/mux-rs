@@ -32,7 +32,15 @@ pub async fn resolve_to_base64(
             Ok((STANDARD.encode(bytes), mime))
         }
         MediaSource::Url(url) => {
-            let resp = http.get(url).send().await?;
+            // The caller's `http` client may not have a timeout configured.
+            // Apply a per-request timeout so a slow remote can't hang the
+            // entire LLM call. `RequestBuilder::timeout` overrides the
+            // client's default for just this request.
+            let resp = http
+                .get(url)
+                .timeout(std::time::Duration::from_secs(30))
+                .send()
+                .await?;
             let resp = resp.error_for_status()?;
             let mime = if !mime_hint.is_empty() {
                 mime_hint.to_string()

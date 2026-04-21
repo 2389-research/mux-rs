@@ -60,13 +60,23 @@ pub enum OpenAIContent {
 pub enum OpenAIContentPart {
     Text { text: String },
     ImageUrl { image_url: OpenAIImageUrl },
-    InputFile { file_data: String },
+    File { file: OpenAIFile },
     InputAudio { input_audio: OpenAIInputAudio },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct OpenAIImageUrl {
     pub url: String,
+}
+
+/// OpenAI file content for the Chat Completions API.
+/// `file_data` is a data URL of the form `data:{mime};base64,{data}`.
+/// `filename` is an optional hint for the document name.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct OpenAIFile {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub filename: Option<String>,
+    pub file_data: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -408,13 +418,22 @@ fn try_media_part(
             })
         }
         MediaKind::Document => {
-            let data = match source {
-                MediaSource::Base64(data) => data.clone(),
+            // Chat Completions expects the file_data as a data URL
+            // ("data:{mime};base64,{data}") — not plain base64.
+            let data_url = match source {
+                MediaSource::Base64(data) => {
+                    if mime_type.is_empty() {
+                        return Err(LlmError::Configuration(
+                            "document_base64 requires a non-empty mime_type".into(),
+                        ));
+                    }
+                    format!("data:{};base64,{}", mime_type, data)
+                }
                 MediaSource::Url(_) => {
-                    // OpenAI's input_file does NOT accept URLs; only file_data (base64) or file_id.
+                    // OpenAI's file input does NOT accept URLs; only file_data (base64) or file_id.
                     // file_id belongs to the Files API — out of scope for this task.
                     return Err(LlmError::Configuration(
-                        "openai input_file requires base64 data; URL sources are not supported"
+                        "openai file input requires base64 data; URL sources are not supported"
                             .into(),
                     ));
                 }
@@ -424,7 +443,12 @@ fn try_media_part(
                     ));
                 }
             };
-            Ok(OpenAIContentPart::InputFile { file_data: data })
+            Ok(OpenAIContentPart::File {
+                file: OpenAIFile {
+                    filename: None,
+                    file_data: data_url,
+                },
+            })
         }
         MediaKind::Audio => {
             let data = match source {
@@ -852,15 +876,19 @@ mod openai_test {
     }
 
     #[test]
-    fn test_openai_document_as_input_file() {
+    fn test_openai_document_as_file() {
         let req = Request::new("gpt-4o").message(Message::user_with(vec![
             ContentBlock::document_base64("application/pdf", "JVBERi0="),
         ]));
         let oa = try_into_openai_request(&req).unwrap();
         let json = serde_json::to_value(&oa).unwrap();
         let part = &json["messages"][0]["content"][0];
-        assert_eq!(part["type"], "input_file");
-        assert_eq!(part["file_data"], "JVBERi0=");
+        assert_eq!(part["type"], "file");
+        let file_data = part["file"]["file_data"]
+            .as_str()
+            .expect("file_data string");
+        assert!(file_data.starts_with("data:application/pdf;base64,"));
+        assert!(file_data.ends_with("JVBERi0="));
     }
 
     #[test]
