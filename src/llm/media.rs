@@ -12,6 +12,9 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 ///   `mime_hint` is empty.
 /// - `Url`: fetched via the provided client, encoded. Mime inferred from the
 ///   response's Content-Type header or URL extension if `mime_hint` is empty.
+///
+/// If `mime_hint` is non-empty it wins for all variants; otherwise mime is
+/// inferred from Content-Type (URL) or extension (URL/Path).
 pub async fn resolve_to_base64(
     source: &MediaSource,
     mime_hint: &str,
@@ -30,6 +33,7 @@ pub async fn resolve_to_base64(
         }
         MediaSource::Url(url) => {
             let resp = http.get(url).send().await?;
+            let resp = resp.error_for_status()?;
             let mime = if !mime_hint.is_empty() {
                 mime_hint.to_string()
             } else {
@@ -123,6 +127,23 @@ mod tests {
         assert_eq!(
             mime_from_url("https://example.com/no-ext"),
             "application/octet-stream"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_url_error_status_returns_error() {
+        // Use a bogus local URL that will 404 or fail to connect.
+        // Purpose: confirm error_for_status() surfaces the failure
+        // rather than silently encoding an error response body.
+        let src = MediaSource::Url("http://127.0.0.1:1/nonexistent".to_string());
+        let http = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(2))
+            .build()
+            .unwrap();
+        let result = resolve_to_base64(&src, "image/png", &http).await;
+        assert!(
+            result.is_err(),
+            "expected an error for an unreachable URL, got Ok"
         );
     }
 }
