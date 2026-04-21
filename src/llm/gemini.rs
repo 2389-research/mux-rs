@@ -261,6 +261,7 @@ fn convert_message_to_content(
                     serde_json::json!({ "result": content }),
                 ))
             }
+            ContentBlock::Media { .. } => todo!("Media handling in later task"),
         })
         .collect();
 

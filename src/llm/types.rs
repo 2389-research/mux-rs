@@ -2,6 +2,7 @@
 // ABOUTME: tool definitions, requests, and responses.
 
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 
 /// Role of a message sender.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -18,6 +19,36 @@ pub enum StopReason {
     EndTurn,
     ToolUse,
     MaxTokens,
+}
+
+/// Kind of media payload in a `ContentBlock::Media`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MediaKind {
+    Image,
+    Document,
+    Audio,
+    Video,
+}
+
+impl std::fmt::Display for MediaKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            MediaKind::Image => write!(f, "image"),
+            MediaKind::Document => write!(f, "document"),
+            MediaKind::Audio => write!(f, "audio"),
+            MediaKind::Video => write!(f, "video"),
+        }
+    }
+}
+
+/// Source of media bytes. Base64 is inline; Url is remote; Path is local file.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MediaSource {
+    Base64(String),
+    Url(String),
+    Path(PathBuf),
 }
 
 /// A block of content within a message.
@@ -37,6 +68,11 @@ pub enum ContentBlock {
         content: String,
         #[serde(default)]
         is_error: bool,
+    },
+    Media {
+        kind: MediaKind,
+        source: MediaSource,
+        mime_type: String,
     },
 }
 
@@ -62,6 +98,60 @@ impl ContentBlock {
             content: error.into(),
             is_error: true,
         }
+    }
+
+    /// Generic media constructor with base64-encoded data.
+    pub fn media_base64(kind: MediaKind, mime: impl Into<String>, data: impl Into<String>) -> Self {
+        Self::Media {
+            kind,
+            source: MediaSource::Base64(data.into()),
+            mime_type: mime.into(),
+        }
+    }
+
+    /// Generic media constructor from a remote URL. Mime inferred by provider if empty.
+    pub fn media_url(kind: MediaKind, mime: impl Into<String>, url: impl Into<String>) -> Self {
+        Self::Media {
+            kind,
+            source: MediaSource::Url(url.into()),
+            mime_type: mime.into(),
+        }
+    }
+
+    /// Generic media constructor from a local file. Mime inferred by provider if empty.
+    pub fn media_path(kind: MediaKind, mime: impl Into<String>, path: impl Into<PathBuf>) -> Self {
+        Self::Media {
+            kind,
+            source: MediaSource::Path(path.into()),
+            mime_type: mime.into(),
+        }
+    }
+
+    pub fn image_base64(mime: impl Into<String>, data: impl Into<String>) -> Self {
+        Self::media_base64(MediaKind::Image, mime, data)
+    }
+    pub fn image_url(url: impl Into<String>) -> Self {
+        Self::Media {
+            kind: MediaKind::Image,
+            source: MediaSource::Url(url.into()),
+            mime_type: String::new(),
+        }
+    }
+    pub fn image_path(path: impl Into<PathBuf>) -> Self {
+        Self::Media {
+            kind: MediaKind::Image,
+            source: MediaSource::Path(path.into()),
+            mime_type: String::new(),
+        }
+    }
+    pub fn document_base64(mime: impl Into<String>, data: impl Into<String>) -> Self {
+        Self::media_base64(MediaKind::Document, mime, data)
+    }
+    pub fn audio_base64(mime: impl Into<String>, data: impl Into<String>) -> Self {
+        Self::media_base64(MediaKind::Audio, mime, data)
+    }
+    pub fn video_base64(mime: impl Into<String>, data: impl Into<String>) -> Self {
+        Self::media_base64(MediaKind::Video, mime, data)
     }
 }
 
@@ -94,6 +184,14 @@ impl Message {
         Self {
             role: Role::User,
             content: results,
+        }
+    }
+
+    /// Create a user message with pre-built content blocks (text, media, etc.).
+    pub fn user_with(content: Vec<ContentBlock>) -> Self {
+        Self {
+            role: Role::User,
+            content,
         }
     }
 }

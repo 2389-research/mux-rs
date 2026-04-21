@@ -189,6 +189,7 @@ impl MuxEngine {
                             mux::llm::ContentBlock::ToolResult { content, .. } => {
                                 estimate_tokens(content)
                             }
+                            mux::llm::ContentBlock::Media { .. } => 0,
                         })
                         .sum::<u32>()
                 })
@@ -292,6 +293,7 @@ impl MuxEngine {
                         mux::llm::ContentBlock::ToolResult { content, .. } => {
                             estimate_tokens(content)
                         }
+                        mux::llm::ContentBlock::Media { .. } => 0,
                     })
                     .sum();
 
@@ -487,6 +489,7 @@ impl MuxEngine {
                         mux::llm::ContentBlock::ToolResult { content, .. } => {
                             estimate_tokens(content)
                         }
+                        mux::llm::ContentBlock::Media { .. } => 0,
                     })
                     .sum::<u32>()
             })

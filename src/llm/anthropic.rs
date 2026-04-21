@@ -200,6 +200,7 @@ impl From<&ContentBlock> for AnthropicContent {
                 content: content.clone(),
                 is_error: *is_error,
             },
+            ContentBlock::Media { .. } => todo!("Media handling in later task"),
         }
     }
 }

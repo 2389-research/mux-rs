@@ -497,3 +497,69 @@ fn test_token_usage_snapshot_default() {
     assert_eq!(snapshot.cache_write_tokens, 0);
     assert_eq!(snapshot.request_count, 0);
 }
+
+// --- Media ContentBlock Tests ---
+
+#[test]
+fn test_media_image_base64_constructor() {
+    let block = ContentBlock::image_base64("image/png", "aGVsbG8=");
+    match block {
+        ContentBlock::Media {
+            kind,
+            source,
+            mime_type,
+        } => {
+            assert_eq!(kind, MediaKind::Image);
+            assert!(matches!(source, MediaSource::Base64(ref s) if s == "aGVsbG8="));
+            assert_eq!(mime_type, "image/png");
+        }
+        _ => panic!("expected Media variant"),
+    }
+}
+
+#[test]
+fn test_media_serde_roundtrip() {
+    let block = ContentBlock::Media {
+        kind: MediaKind::Image,
+        source: MediaSource::Url("https://example.com/a.png".to_string()),
+        mime_type: "image/png".to_string(),
+    };
+    let json = serde_json::to_string(&block).unwrap();
+    let back: ContentBlock = serde_json::from_str(&json).unwrap();
+    match back {
+        ContentBlock::Media {
+            kind, mime_type, ..
+        } => {
+            assert_eq!(kind, MediaKind::Image);
+            assert_eq!(mime_type, "image/png");
+        }
+        _ => panic!("expected Media variant"),
+    }
+}
+
+#[test]
+fn test_message_user_with_multiple_blocks() {
+    let msg = Message::user_with(vec![
+        ContentBlock::text("look at this"),
+        ContentBlock::image_url("https://example.com/a.png"),
+    ]);
+    assert_eq!(msg.role, Role::User);
+    assert_eq!(msg.content.len(), 2);
+}
+
+#[test]
+fn test_document_audio_video_constructors() {
+    let d = ContentBlock::document_base64("application/pdf", "JVBE");
+    let a = ContentBlock::audio_base64("audio/wav", "UklGR");
+    let v = ContentBlock::video_base64("video/mp4", "AAAAG");
+    for (b, expected_kind) in [
+        (d, MediaKind::Document),
+        (a, MediaKind::Audio),
+        (v, MediaKind::Video),
+    ] {
+        match b {
+            ContentBlock::Media { kind, .. } => assert_eq!(kind, expected_kind),
+            _ => panic!(),
+        }
+    }
+}
