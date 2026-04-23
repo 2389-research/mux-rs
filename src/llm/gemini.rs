@@ -2,7 +2,9 @@
 // ABOUTME: Implements LlmClient trait for Gemini models.
 
 use super::client::StreamEvent;
-use super::{ContentBlock, Message, Request, Response, Role, StopReason, ToolDefinition, Usage};
+use super::{
+    ContentBlock, MediaSource, Message, Request, Response, Role, StopReason, ToolDefinition, Usage,
+};
 use crate::error::LlmError;
 use async_trait::async_trait;
 use futures::Stream;
@@ -268,11 +270,33 @@ fn build_tool_name_lookup(messages: &[Message]) -> std::collections::HashMap<Str
     lookup
 }
 
+/// Pre-flight validator: Gemini requires inline media bytes via `inline_data`
+/// and does not accept arbitrary public URLs (the Files API takes a `file_uri`,
+/// but that's a separate, Gemini-managed URI). `MediaSource::Url` is therefore
+/// rejected here before any serialization or network call. The library does
+/// not fetch URLs on the caller's behalf — callers that want to send a URL's
+/// bytes to Gemini must fetch themselves and pass `MediaSource::Base64`.
+fn validate_gemini_sources(req: &Request) -> Result<(), LlmError> {
+    for msg in &req.messages {
+        for block in &msg.content {
+            if let ContentBlock::Media { kind, source, .. } = block
+                && matches!(source, MediaSource::Url(_))
+            {
+                return Err(LlmError::UnsupportedSource {
+                    provider: "gemini",
+                    kind: *kind,
+                    source_kind: source.kind(),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
 fn try_convert_message_to_content(
     msg: &Message,
     tool_name_lookup: &std::collections::HashMap<String, String>,
 ) -> Result<GeminiContent, LlmError> {
-    use crate::llm::MediaSource;
     let role = match msg.role {
         Role::User => "user",
         Role::Assistant => "model",
@@ -333,8 +357,9 @@ fn try_convert_message_to_content(
 }
 
 /// Build a `GeminiRequest` from a `Request`. Fallible because unresolved
-/// `MediaSource::Path`/`Url` are rejected — resolve via
-/// `resolve_request_media_fully` before calling.
+/// `MediaSource::Path`/`Url` are rejected — resolve `Path` via
+/// `resolve_request_media`, and reject `Url` pre-flight via
+/// `validate_gemini_sources`, before calling.
 pub fn try_into_gemini_request(req: &Request) -> Result<GeminiRequest, LlmError> {
     let tool_name_lookup = build_tool_name_lookup(&req.messages);
 
@@ -453,7 +478,8 @@ impl super::client::LlmClient for GeminiClient {
     }
 
     async fn create_message(&self, req: &Request) -> Result<Response, LlmError> {
-        let resolved = crate::llm::media::resolve_request_media_fully(req, &self.http).await?;
+        validate_gemini_sources(req)?;
+        let resolved = crate::llm::media::resolve_request_media(req, &self.http).await?;
         let gemini_req = try_into_gemini_request(&resolved)?;
         let url = format!(
             "{}?key={}",
@@ -496,7 +522,8 @@ impl super::client::LlmClient for GeminiClient {
         let req = req.clone();
 
         Box::pin(async_stream::try_stream! {
-            let resolved = crate::llm::media::resolve_request_media_fully(&req, &http).await?;
+            validate_gemini_sources(&req)?;
+            let resolved = crate::llm::media::resolve_request_media(&req, &http).await?;
             let gemini_req = try_into_gemini_request(&resolved)?;
 
             let response = http
@@ -720,15 +747,21 @@ mod gemini_test {
     }
 
     #[test]
-    fn test_gemini_url_before_resolution_errors() {
-        // try_into_gemini_request assumes URLs are pre-fetched.
+    fn test_gemini_url_rejected_preflight() {
+        // validate_gemini_sources rejects Url sources before any serialization
+        // or network call happens. The underlying try_into_gemini_request still
+        // has a defensive Configuration arm for Url sources, but it should
+        // never be reached in practice.
         let req = Request::new("gemini-1.5-flash").message(Message::user_with(vec![
             ContentBlock::image_url("https://example.com/a.png"),
         ]));
-        let result = try_into_gemini_request(&req);
+        let result = validate_gemini_sources(&req);
         assert!(matches!(
             result,
-            Err(crate::error::LlmError::Configuration(_))
+            Err(crate::error::LlmError::UnsupportedSource {
+                provider: "gemini",
+                ..
+            })
         ));
     }
 

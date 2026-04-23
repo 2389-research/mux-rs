@@ -55,6 +55,38 @@ pub enum MediaSource {
     Path(PathBuf),
 }
 
+impl MediaSource {
+    /// Returns the discriminant of this source without the data payload.
+    /// Used for error reporting (e.g. "gemini does not support url source for image media").
+    pub fn kind(&self) -> MediaSourceKind {
+        match self {
+            MediaSource::Base64(_) => MediaSourceKind::Base64,
+            MediaSource::Url(_) => MediaSourceKind::Url,
+            MediaSource::Path(_) => MediaSourceKind::Path,
+        }
+    }
+}
+
+/// Discriminant of `MediaSource` without the data payload. Used in error
+/// types (e.g. `LlmError::UnsupportedSource`) so the variant can be named
+/// without cloning the underlying bytes/URL/path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MediaSourceKind {
+    Base64,
+    Url,
+    Path,
+}
+
+impl std::fmt::Display for MediaSourceKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            MediaSourceKind::Base64 => write!(f, "base64"),
+            MediaSourceKind::Url => write!(f, "url"),
+            MediaSourceKind::Path => write!(f, "path"),
+        }
+    }
+}
+
 /// A block of content within a message.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]

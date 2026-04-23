@@ -209,3 +209,23 @@ async fn gemini_video() {
         .expect("gemini video api call");
     assert!(!resp.text().is_empty());
 }
+
+#[tokio::test]
+async fn gemini_rejects_url_source_preflight() {
+    // Gemini requires inline bytes — the library never fetches URLs for it.
+    // No API key needed: the validator rejects before any network call.
+    let client = GeminiClient::new("fake-key-not-actually-used");
+    let req = Request::new("gemini-1.5-flash")
+        .message(Message::user_with(vec![ContentBlock::image_url(
+            "https://example.com/x.png",
+        )]))
+        .max_tokens(64);
+    let result = client.create_message(&req).await;
+    assert!(matches!(
+        result,
+        Err(mux::error::LlmError::UnsupportedSource {
+            provider: "gemini",
+            ..
+        })
+    ));
+}
