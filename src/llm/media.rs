@@ -33,14 +33,22 @@ pub async fn resolve_to_base64(
     match source {
         MediaSource::Base64(data) => Ok((data.clone(), mime_hint.to_string())),
         MediaSource::Path(p) => {
-            let metadata = tokio::fs::metadata(p).await?;
-            if metadata.len() > MAX_MEDIA_BYTES {
+            use tokio::io::AsyncReadExt;
+            // Single-handle bounded stream read avoids the TOCTOU window that
+            // a separate `metadata()` + `read()` would introduce. We read up
+            // to MAX_MEDIA_BYTES + 1 bytes; if we got more than MAX, reject.
+            let mut file = tokio::fs::File::open(p).await?;
+            let mut bytes = Vec::new();
+            let n = file
+                .take(MAX_MEDIA_BYTES + 1)
+                .read_to_end(&mut bytes)
+                .await?;
+            if (n as u64) > MAX_MEDIA_BYTES {
                 return Err(LlmError::MediaTooLarge {
                     limit: MAX_MEDIA_BYTES as usize,
-                    actual: metadata.len(),
+                    actual: n as u64,
                 });
             }
-            let bytes = tokio::fs::read(p).await?;
             let mime = if !mime_hint.is_empty() {
                 mime_hint.to_string()
             } else {

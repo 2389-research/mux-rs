@@ -10,7 +10,18 @@ fn fixture(name: &str) -> PathBuf {
         .join(name)
 }
 
+fn live_tests_enabled() -> bool {
+    matches!(
+        std::env::var("RUN_LIVE_MEDIA_TESTS").as_deref(),
+        Ok("1") | Ok("true")
+    )
+}
+
 fn skip_unless(key: &str) -> Option<String> {
+    if !live_tests_enabled() {
+        eprintln!("skip: RUN_LIVE_MEDIA_TESTS not set");
+        return None;
+    }
     match std::env::var(key) {
         Ok(v) if !v.is_empty() => Some(v),
         _ => {
@@ -123,6 +134,10 @@ async fn openai_audio() {
 // ---------- Gemini ----------
 
 fn gemini_key() -> Option<String> {
+    if !live_tests_enabled() {
+        eprintln!("skip: RUN_LIVE_MEDIA_TESTS not set");
+        return None;
+    }
     // Gemini accepts either env var per GeminiClient::from_env behavior.
     std::env::var("GEMINI_API_KEY")
         .ok()

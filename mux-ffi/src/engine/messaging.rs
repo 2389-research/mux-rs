@@ -11,7 +11,7 @@ use crate::types::Provider;
 use async_trait::async_trait;
 use mux::agent::{AgentDefinition, AgentRegistry, SubAgent};
 use mux::hook::{Hook, HookAction, HookEvent, HookRegistry};
-use mux::llm::GeminiClient;
+use mux::llm::{GeminiClient, MediaSource};
 use mux::prelude::{
     AnthropicClient, ContentBlock, LlmClient, McpClient, Message, OpenAIClient, Registry, Role,
 };
@@ -95,6 +95,47 @@ impl Hook for ChatCallbackHook {
     }
 }
 
+/// Convert `FfiMedia` attachments into core `ContentBlock::Media` blocks,
+/// resolving any `MediaSource::Path` to `MediaSource::Base64` so the blocks
+/// are portable (no host-dependent filesystem paths) when persisted to
+/// conversation history. Non-Path sources pass through unchanged.
+///
+/// Consolidating the Path -> Base64 step at the FFI boundary means the
+/// resolved bytes are shared by both the persisted user message and the LLM
+/// request, avoiding double reads.
+async fn ffi_media_into_blocks(
+    media: Vec<crate::media::FfiMedia>,
+) -> Result<Vec<ContentBlock>, String> {
+    let mut blocks = Vec::with_capacity(media.len());
+    // `resolve_to_base64` takes a `&reqwest::Client` but does not use it for
+    // Path sources — a throwaway client is fine here.
+    let http = reqwest::Client::new();
+    for m in media {
+        let block = m.into_content_block();
+        let block = match block {
+            ContentBlock::Media {
+                kind,
+                source: MediaSource::Path(ref p),
+                ref mime_type,
+            } => {
+                let path_src = MediaSource::Path(p.clone());
+                let mime_hint = mime_type.clone();
+                let (data, mime) = mux::llm::resolve_to_base64(&path_src, &mime_hint, &http)
+                    .await
+                    .map_err(|e| format!("media resolution failed: {}", e))?;
+                ContentBlock::Media {
+                    kind,
+                    source: MediaSource::Base64(data),
+                    mime_type: mime,
+                }
+            }
+            other => other,
+        };
+        blocks.push(block);
+    }
+    Ok(blocks)
+}
+
 /// Messaging implementation using SubAgent for unified agentic execution.
 impl MuxEngine {
     /// Build a tool Registry containing all available tools for this conversation.
@@ -165,6 +206,19 @@ impl MuxEngine {
         media: Vec<crate::media::FfiMedia>,
         callback: Arc<Box<dyn ChatCallback>>,
     ) -> Result<ChatResult, String> {
+        // Resolve any MediaSource::Path attachments to Base64 at the FFI
+        // boundary so the Vec<ContentBlock> we persist into conversation
+        // history (and hand to the LLM) never embeds host-dependent filesystem
+        // paths. Done once up front so echo-fallback and real-LLM paths share
+        // the same resolved blocks.
+        let media_blocks = match ffi_media_into_blocks(media).await {
+            Ok(blocks) => blocks,
+            Err(e) => {
+                callback.on_error(e.clone());
+                return Err(e);
+            }
+        };
+
         // Get current provider and create appropriate client
         let provider = self.default_provider.read().clone();
 
@@ -202,13 +256,15 @@ impl MuxEngine {
                         callback.on_text_delta(echo_text.clone());
 
                         // Build user content blocks with any attached media.
+                        // media_blocks was resolved up front; any Path sources
+                        // have already been normalized to Base64.
                         let mut user_blocks: Vec<ContentBlock> =
-                            Vec::with_capacity(1 + media.len());
+                            Vec::with_capacity(1 + media_blocks.len());
                         if !content.is_empty() {
                             user_blocks.push(ContentBlock::text(content.clone()));
                         }
-                        for m in media {
-                            user_blocks.push(m.into_content_block());
+                        for block in media_blocks {
+                            user_blocks.push(block);
                         }
 
                         // Store in history
@@ -361,16 +417,17 @@ impl MuxEngine {
         // Run the agent with the user's message. If media attachments are
         // present, dispatch through `run_with_blocks` so the media blocks
         // reach the provider alongside the text; otherwise use the plain
-        // text path.
-        let run_result = if media.is_empty() {
+        // text path. media_blocks was resolved once up front (Path -> Base64)
+        // and is reused here.
+        let run_result = if media_blocks.is_empty() {
             subagent.run(&content).await
         } else {
-            let mut blocks: Vec<ContentBlock> = Vec::with_capacity(1 + media.len());
+            let mut blocks: Vec<ContentBlock> = Vec::with_capacity(1 + media_blocks.len());
             if !content.is_empty() {
                 blocks.push(ContentBlock::text(content.clone()));
             }
-            for m in media.clone() {
-                blocks.push(m.into_content_block());
+            for block in media_blocks {
+                blocks.push(block);
             }
             subagent.run_with_blocks(blocks).await
         };
@@ -1384,6 +1441,146 @@ mod tests {
 
         // Verify we made 2 calls total
         assert_eq!(call_count.load(Ordering::SeqCst), 2);
+
+        engine.delete_workspace(ws.id).unwrap();
+    }
+
+    #[test]
+    fn test_ffi_media_into_blocks_resolves_path_to_base64() {
+        // The helper should resolve MediaSource::Path attachments to
+        // MediaSource::Base64 so persisted conversations stay portable.
+        let dir = tempfile::tempdir().unwrap();
+        let png_path = dir.path().join("fixture.png");
+        std::fs::write(&png_path, b"fake-png-bytes").unwrap();
+
+        let media = vec![crate::media::FfiMedia {
+            kind: crate::media::FfiMediaKind::Image,
+            source: crate::media::FfiMediaSource::Path {
+                path: png_path.to_string_lossy().into_owned(),
+            },
+            mime_type: "image/png".to_string(),
+        }];
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let blocks = rt.block_on(ffi_media_into_blocks(media)).unwrap();
+        assert_eq!(blocks.len(), 1);
+        match &blocks[0] {
+            ContentBlock::Media {
+                kind,
+                source,
+                mime_type,
+            } => {
+                assert_eq!(*kind, mux::llm::MediaKind::Image);
+                assert_eq!(mime_type, "image/png");
+                // Base64 of b"fake-png-bytes"
+                match source {
+                    MediaSource::Base64(data) => {
+                        assert_eq!(data, "ZmFrZS1wbmctYnl0ZXM=");
+                    }
+                    other => panic!("expected Base64 source, got {:?}", other),
+                }
+            }
+            other => panic!("expected Media block, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_ffi_media_into_blocks_passes_through_non_path_sources() {
+        // Base64 and Url sources should be forwarded without modification.
+        let media = vec![
+            crate::media::FfiMedia {
+                kind: crate::media::FfiMediaKind::Image,
+                source: crate::media::FfiMediaSource::Base64 {
+                    data: "aGVsbG8=".to_string(),
+                },
+                mime_type: "image/png".to_string(),
+            },
+            crate::media::FfiMedia {
+                kind: crate::media::FfiMediaKind::Image,
+                source: crate::media::FfiMediaSource::Url {
+                    url: "https://example.com/x.png".to_string(),
+                },
+                mime_type: "image/png".to_string(),
+            },
+        ];
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let blocks = rt.block_on(ffi_media_into_blocks(media)).unwrap();
+        assert_eq!(blocks.len(), 2);
+        match &blocks[0] {
+            ContentBlock::Media {
+                source: MediaSource::Base64(data),
+                ..
+            } => assert_eq!(data, "aGVsbG8="),
+            other => panic!("expected Base64 source, got {:?}", other),
+        }
+        match &blocks[1] {
+            ContentBlock::Media {
+                source: MediaSource::Url(url),
+                ..
+            } => assert_eq!(url, "https://example.com/x.png"),
+            other => panic!("expected Url source, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_do_send_message_path_media_normalized_to_base64_in_history() {
+        // End-to-end check: a MediaSource::Path attachment passed through
+        // do_send_message should be persisted in history as MediaSource::Base64.
+        let engine = create_test_engine();
+        let ws = engine
+            .create_workspace("Path Normalize Test".to_string(), None)
+            .unwrap();
+        let conv = engine
+            .create_conversation(ws.id.clone(), "Test Conv".to_string())
+            .unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let png_path = dir.path().join("fixture.png");
+        std::fs::write(&png_path, b"fake-png-bytes").unwrap();
+
+        let media = vec![crate::media::FfiMedia {
+            kind: crate::media::FfiMediaKind::Image,
+            source: crate::media::FfiMediaSource::Path {
+                path: png_path.to_string_lossy().into_owned(),
+            },
+            mime_type: "image/png".to_string(),
+        }];
+
+        let callback = Arc::new(TrackingCallback::new());
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let result = rt.block_on(engine.do_send_message(
+            conv.id.clone(),
+            "Describe this image".to_string(),
+            media,
+            Arc::new(Box::new(CallbackWrapper(callback.clone()))),
+        ));
+        assert!(result.is_ok(), "do_send_message failed: {:?}", result);
+
+        // History's user message should have the media block normalized to
+        // Base64 — NOT Path — so saved conversations stay portable.
+        let history = engine.message_history.read();
+        let messages = history.get(&conv.id).expect("history entry for conv");
+        let user_msg = messages
+            .iter()
+            .find(|m| matches!(m.role, Role::User))
+            .expect("user message stored");
+        let media_block = user_msg
+            .content
+            .iter()
+            .find(|b| matches!(b, ContentBlock::Media { .. }))
+            .expect("user message should contain a media block");
+        match media_block {
+            ContentBlock::Media { source, .. } => {
+                assert!(
+                    matches!(source, MediaSource::Base64(_)),
+                    "expected Base64 source in history, got {:?}",
+                    source
+                );
+            }
+            _ => unreachable!(),
+        }
+        drop(history);
 
         engine.delete_workspace(ws.id).unwrap();
     }
