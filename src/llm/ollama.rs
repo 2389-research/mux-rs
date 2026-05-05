@@ -2,7 +2,8 @@
 // ABOUTME: Connects to Ollama server (default localhost:11434) with dummy API key.
 
 use super::client::StreamEvent;
-use super::openai::{OpenAIError, OpenAIRequest, OpenAIResponse, parse_sse_line};
+use super::media::resolve_request_media;
+use super::openai::{OpenAIError, OpenAIResponse, parse_sse_line, try_into_openai_request};
 use super::{ContentBlock, Request, Response, StopReason, Usage};
 use crate::error::LlmError;
 use async_trait::async_trait;
@@ -77,10 +78,36 @@ fn parse_stop_reason(s: Option<&str>) -> StopReason {
     }
 }
 
+/// Reject any non-Image media before serialization.
+///
+/// Ollama's OpenAI-compatible endpoint accepts images on vision models (e.g.
+/// llava) but does not support documents, audio, or video. The shared OpenAI
+/// serializer would happily emit `input_file`/`input_audio` parts that Ollama
+/// servers then reject with opaque errors — fail here with a specific
+/// `UnsupportedMedia { provider: "ollama", .. }` instead.
+fn reject_non_image_media(req: &Request) -> Result<(), LlmError> {
+    use crate::llm::{ContentBlock, MediaKind};
+    for msg in &req.messages {
+        for block in &msg.content {
+            if let ContentBlock::Media { kind, .. } = block
+                && !matches!(kind, MediaKind::Image)
+            {
+                return Err(LlmError::UnsupportedMedia {
+                    provider: "ollama",
+                    kind: *kind,
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
 #[async_trait]
 impl super::client::LlmClient for OllamaClient {
     async fn create_message(&self, req: &Request) -> Result<Response, LlmError> {
-        let mut openai_req = OpenAIRequest::from(req);
+        reject_non_image_media(req)?;
+        let resolved = resolve_request_media(req, &self.http).await?;
+        let mut openai_req = try_into_openai_request(&resolved)?;
 
         // Use default model if none specified
         if openai_req.model.is_empty() {
@@ -116,19 +143,23 @@ impl super::client::LlmClient for OllamaClient {
         &self,
         req: &Request,
     ) -> Pin<Box<dyn Stream<Item = Result<StreamEvent, LlmError>> + Send + 'static>> {
-        let mut openai_req = OpenAIRequest::from(req);
-
-        // Use default model if none specified
-        if openai_req.model.is_empty() {
-            openai_req.model = self.default_model.clone();
-        }
-
-        openai_req.stream = Some(true);
-
         let base_url = self.base_url.clone();
         let http = self.http.clone();
+        let default_model = self.default_model.clone();
+        let req = req.clone();
 
         Box::pin(async_stream::try_stream! {
+            reject_non_image_media(&req)?;
+            let resolved = resolve_request_media(&req, &http).await?;
+            let mut openai_req = try_into_openai_request(&resolved)?;
+
+            // Use default model if none specified
+            if openai_req.model.is_empty() {
+                openai_req.model = default_model;
+            }
+
+            openai_req.stream = Some(true);
+
             let url = format!("{}/chat/completions", base_url);
             let response = http
                 .post(&url)
@@ -271,11 +302,80 @@ impl super::client::LlmClient for OllamaClient {
             }
         })
     }
+
+    fn supports_media(&self, kind: super::MediaKind) -> bool {
+        use super::MediaKind;
+        matches!(kind, MediaKind::Image)
+    }
 }
 
 #[cfg(test)]
 mod ollama_test {
     use super::*;
+    use crate::llm::{ContentBlock, LlmClient, MediaKind, Message, Request};
+
+    #[test]
+    fn test_ollama_supports_media() {
+        let c = OllamaClient::new("llava");
+        assert!(c.supports_media(MediaKind::Image));
+        assert!(!c.supports_media(MediaKind::Document));
+        assert!(!c.supports_media(MediaKind::Audio));
+        assert!(!c.supports_media(MediaKind::Video));
+    }
+
+    #[tokio::test]
+    async fn test_ollama_rejects_document_media() {
+        let c = OllamaClient::new("llava");
+        let req =
+            Request::new("llava").message(Message::user_with(vec![ContentBlock::document_base64(
+                "application/pdf",
+                "JVBE",
+            )]));
+        let result = c.create_message(&req).await;
+        assert!(matches!(
+            result,
+            Err(crate::error::LlmError::UnsupportedMedia {
+                provider: "ollama",
+                kind: MediaKind::Document
+            })
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_ollama_rejects_audio_media() {
+        let c = OllamaClient::new("llava");
+        let req =
+            Request::new("llava").message(Message::user_with(vec![ContentBlock::audio_base64(
+                "audio/wav",
+                "UklGR",
+            )]));
+        let result = c.create_message(&req).await;
+        assert!(matches!(
+            result,
+            Err(crate::error::LlmError::UnsupportedMedia {
+                provider: "ollama",
+                kind: MediaKind::Audio
+            })
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_ollama_rejects_video_media() {
+        let c = OllamaClient::new("llava");
+        let req =
+            Request::new("llava").message(Message::user_with(vec![ContentBlock::video_base64(
+                "video/mp4",
+                "AAAAG",
+            )]));
+        let result = c.create_message(&req).await;
+        assert!(matches!(
+            result,
+            Err(crate::error::LlmError::UnsupportedMedia {
+                provider: "ollama",
+                kind: MediaKind::Video
+            })
+        ));
+    }
 
     #[test]
     fn test_client_new() {
@@ -320,5 +420,20 @@ mod ollama_test {
     fn test_constants() {
         assert_eq!(OLLAMA_BASE_URL, "http://localhost:11434/v1");
         assert_eq!(OLLAMA_DEFAULT_MODEL, "llama3.2");
+    }
+
+    #[tokio::test]
+    async fn test_ollama_resolves_image_path() {
+        let c = OllamaClient::new("llava");
+        let req =
+            Request::new("llava").message(Message::user_with(vec![ContentBlock::image_path(
+                std::path::PathBuf::from("/nonexistent/path/image.png"),
+            )]));
+        let result = c.create_message(&req).await;
+        assert!(
+            matches!(result, Err(crate::error::LlmError::Io(_))),
+            "expected Io error for missing file, got {:?}",
+            result
+        );
     }
 }

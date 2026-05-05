@@ -15,6 +15,34 @@ use mux::prelude::{ContentBlock, Role};
 use std::sync::Arc;
 use tokio::runtime::Runtime;
 
+/// Rough token estimate for a media block.
+///
+/// These are conservative upper-bound approximations used only for
+/// context-management compaction decisions — not for billing or request
+/// sizing. Actual provider token counts will differ.
+fn estimate_media_tokens(kind: mux::llm::MediaKind, source: &mux::llm::MediaSource) -> u32 {
+    let bytes = approx_media_bytes(source);
+    match kind {
+        mux::llm::MediaKind::Image => 1000,
+        mux::llm::MediaKind::Document => bytes.map(|b| (b / 4) as u32).unwrap_or(512),
+        mux::llm::MediaKind::Audio => bytes.map(|b| (b / 1000) as u32).unwrap_or(256),
+        mux::llm::MediaKind::Video => bytes.map(|b| (b / 500) as u32).unwrap_or(768),
+    }
+}
+
+/// Approximate the decoded byte size of a media source.
+///
+/// Base64 strings inflate bytes by ~4/3, so decoded size is roughly
+/// `len * 3 / 4`. Url and Path sources return `None` because the bytes aren't
+/// available pre-flight; callers substitute a conservative fallback token
+/// floor so unresolved media isn't invisible to context-pressure checks.
+fn approx_media_bytes(source: &mux::llm::MediaSource) -> Option<usize> {
+    match source {
+        mux::llm::MediaSource::Base64(data) => Some(data.len() * 3 / 4),
+        mux::llm::MediaSource::Url(_) | mux::llm::MediaSource::Path(_) => None,
+    }
+}
+
 /// Context configuration and usage methods
 impl MuxEngine {
     /// Set context configuration for a specific model.
@@ -189,6 +217,9 @@ impl MuxEngine {
                             mux::llm::ContentBlock::ToolResult { content, .. } => {
                                 estimate_tokens(content)
                             }
+                            mux::llm::ContentBlock::Media { kind, source, .. } => {
+                                estimate_media_tokens(*kind, source)
+                            }
                         })
                         .sum::<u32>()
                 })
@@ -291,6 +322,9 @@ impl MuxEngine {
                         }
                         mux::llm::ContentBlock::ToolResult { content, .. } => {
                             estimate_tokens(content)
+                        }
+                        mux::llm::ContentBlock::Media { kind, source, .. } => {
+                            estimate_media_tokens(*kind, source)
                         }
                     })
                     .sum();
@@ -487,9 +521,67 @@ impl MuxEngine {
                         mux::llm::ContentBlock::ToolResult { content, .. } => {
                             estimate_tokens(content)
                         }
+                        mux::llm::ContentBlock::Media { kind, source, .. } => {
+                            estimate_media_tokens(*kind, source)
+                        }
                     })
                     .sum::<u32>()
             })
             .sum()
+    }
+}
+
+#[cfg(test)]
+mod token_estimate_tests {
+    use super::*;
+    use mux::llm::{MediaKind, MediaSource};
+
+    #[test]
+    fn image_has_flat_baseline() {
+        let s = MediaSource::Base64("aGVsbG8=".to_string());
+        assert_eq!(estimate_media_tokens(MediaKind::Image, &s), 1000);
+    }
+
+    #[test]
+    fn document_scales_with_bytes() {
+        // 4000 base64 chars ≈ 3000 bytes, doc estimate = 3000/4 = 750
+        let data = "A".repeat(4000);
+        let s = MediaSource::Base64(data);
+        assert_eq!(estimate_media_tokens(MediaKind::Document, &s), 750);
+    }
+
+    #[test]
+    fn audio_scales_with_bytes() {
+        let data = "A".repeat(40_000); // ~30kB
+        let s = MediaSource::Base64(data);
+        // 30000 / 1000 = 30
+        assert_eq!(estimate_media_tokens(MediaKind::Audio, &s), 30);
+    }
+
+    #[test]
+    fn video_scales_with_bytes() {
+        let data = "A".repeat(400_000); // ~300kB
+        let s = MediaSource::Base64(data);
+        // 300000 / 500 = 600
+        assert_eq!(estimate_media_tokens(MediaKind::Video, &s), 600);
+    }
+
+    #[test]
+    fn url_uses_fallback_tokens_for_non_image() {
+        let s = MediaSource::Url("https://example.com/x.png".to_string());
+        assert_eq!(estimate_media_tokens(MediaKind::Document, &s), 512);
+        assert_eq!(estimate_media_tokens(MediaKind::Image, &s), 1000);
+    }
+
+    #[test]
+    fn url_and_path_use_fallback_floor() {
+        let url_src = MediaSource::Url("https://example.com/x.pdf".to_string());
+        let path_src = MediaSource::Path(std::path::PathBuf::from("/tmp/x.pdf"));
+        assert_eq!(estimate_media_tokens(MediaKind::Document, &url_src), 512);
+        assert_eq!(estimate_media_tokens(MediaKind::Document, &path_src), 512);
+        assert_eq!(estimate_media_tokens(MediaKind::Audio, &url_src), 256);
+        assert_eq!(estimate_media_tokens(MediaKind::Video, &url_src), 768);
+        // Image stays flat regardless
+        assert_eq!(estimate_media_tokens(MediaKind::Image, &url_src), 1000);
     }
 }

@@ -2,7 +2,8 @@
 // ABOUTME: Supports custom HTTP-Referer and X-Title headers for app identification.
 
 use super::client::StreamEvent;
-use super::openai::{OpenAIError, OpenAIRequest, OpenAIResponse, parse_sse_line};
+use super::media::resolve_request_media;
+use super::openai::{OpenAIError, OpenAIResponse, parse_sse_line, try_into_openai_request};
 use super::{ContentBlock, Request, Response, StopReason, Usage};
 use crate::error::LlmError;
 use async_trait::async_trait;
@@ -96,7 +97,8 @@ fn parse_stop_reason(s: Option<&str>) -> StopReason {
 #[async_trait]
 impl super::client::LlmClient for OpenRouterClient {
     async fn create_message(&self, req: &Request) -> Result<Response, LlmError> {
-        let mut openai_req = OpenAIRequest::from(req);
+        let resolved = resolve_request_media(req, &self.http).await?;
+        let mut openai_req = try_into_openai_request(&resolved)?;
 
         // Use default model if none specified
         if openai_req.model.is_empty() {
@@ -131,19 +133,22 @@ impl super::client::LlmClient for OpenRouterClient {
         &self,
         req: &Request,
     ) -> Pin<Box<dyn Stream<Item = Result<StreamEvent, LlmError>> + Send + 'static>> {
-        let mut openai_req = OpenAIRequest::from(req);
-
-        // Use default model if none specified
-        if openai_req.model.is_empty() {
-            openai_req.model = self.default_model.clone();
-        }
-
-        openai_req.stream = Some(true);
-
         let api_key = self.api_key.clone();
         let http = self.http.clone();
+        let default_model = self.default_model.clone();
+        let req = req.clone();
 
         Box::pin(async_stream::try_stream! {
+            let resolved = resolve_request_media(&req, &http).await?;
+            let mut openai_req = try_into_openai_request(&resolved)?;
+
+            // Use default model if none specified
+            if openai_req.model.is_empty() {
+                openai_req.model = default_model;
+            }
+
+            openai_req.stream = Some(true);
+
             let url = format!("{}/chat/completions", OPENROUTER_BASE_URL);
             let response = http
                 .post(&url)
@@ -286,11 +291,29 @@ impl super::client::LlmClient for OpenRouterClient {
             }
         })
     }
+
+    fn supports_media(&self, kind: super::MediaKind) -> bool {
+        use super::MediaKind;
+        matches!(
+            kind,
+            MediaKind::Image | MediaKind::Document | MediaKind::Audio
+        )
+    }
 }
 
 #[cfg(test)]
 mod openrouter_test {
     use super::*;
+    use crate::llm::{LlmClient, MediaKind, Message};
+
+    #[test]
+    fn test_openrouter_supports_media() {
+        let c = OpenRouterClient::new("fake");
+        assert!(c.supports_media(MediaKind::Image));
+        assert!(c.supports_media(MediaKind::Document));
+        assert!(c.supports_media(MediaKind::Audio));
+        assert!(!c.supports_media(MediaKind::Video));
+    }
 
     #[test]
     fn test_client_from_env_missing() {
@@ -327,5 +350,24 @@ mod openrouter_test {
     fn test_constants() {
         assert_eq!(OPENROUTER_BASE_URL, "https://openrouter.ai/api/v1");
         assert_eq!(OPENROUTER_DEFAULT_MODEL, "anthropic/claude-3.5-sonnet");
+    }
+
+    #[tokio::test]
+    async fn test_openrouter_resolves_image_path() {
+        // Confirms that a MediaSource::Path for an image is resolved to Base64
+        // before serialization. We can't actually hit the OpenRouter API in a
+        // unit test, but we can verify that path resolution runs first: if the
+        // path doesn't exist, we should get an Io error, not a Configuration
+        // error saying "Path must be resolved".
+        let c = OpenRouterClient::new("fake");
+        let req = Request::new("anthropic/claude-3.5-sonnet").message(Message::user_with(vec![
+            ContentBlock::image_path(std::path::PathBuf::from("/nonexistent/path/image.png")),
+        ]));
+        let result = c.create_message(&req).await;
+        assert!(
+            matches!(result, Err(crate::error::LlmError::Io(_))),
+            "expected Io error for missing file, got {:?}",
+            result
+        );
     }
 }

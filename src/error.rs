@@ -34,6 +34,28 @@ pub enum LlmError {
 
     #[error("Configuration error: {0}")]
     Configuration(String),
+
+    #[error("{provider} does not support {kind} media")]
+    UnsupportedMedia {
+        provider: &'static str,
+        kind: crate::llm::MediaKind,
+    },
+
+    /// A provider doesn't support a particular media source variant
+    /// (e.g. Gemini requires inline bytes and rejects remote URL sources).
+    #[error("{provider} does not support {source_kind} source for {kind} media")]
+    UnsupportedSource {
+        provider: &'static str,
+        kind: crate::llm::MediaKind,
+        source_kind: crate::llm::MediaSourceKind,
+    },
+
+    /// A local media file exceeds the configured size ceiling.
+    #[error("media file exceeds {limit} bytes (got {actual})")]
+    MediaTooLarge { limit: usize, actual: u64 },
+
+    #[error("IO error: {0}")]
+    Io(#[from] std::io::Error),
 }
 
 /// Errors from tool operations.
@@ -79,4 +101,25 @@ pub enum McpError {
 
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
+}
+
+#[cfg(test)]
+mod error_test {
+    use super::*;
+    use crate::llm::MediaKind;
+
+    #[test]
+    fn test_unsupported_media_display() {
+        let err = LlmError::UnsupportedMedia {
+            provider: "anthropic",
+            kind: MediaKind::Audio,
+        };
+        assert_eq!(err.to_string(), "anthropic does not support audio media");
+    }
+
+    #[test]
+    fn test_io_display() {
+        let err = LlmError::Io(std::io::Error::new(std::io::ErrorKind::NotFound, "missing"));
+        assert!(err.to_string().contains("missing"));
+    }
 }

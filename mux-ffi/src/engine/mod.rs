@@ -267,6 +267,7 @@ impl MuxEngine {
         self: Arc<Self>,
         conversation_id: String,
         content: String,
+        media: Vec<crate::media::FfiMedia>,
         callback: Box<dyn ChatCallback>,
     ) {
         let engine = self.clone();
@@ -283,7 +284,7 @@ impl MuxEngine {
             };
             rt.block_on(async move {
                 match engine
-                    .do_send_message(conversation_id.clone(), content, cb.clone())
+                    .do_send_message(conversation_id.clone(), content, media, cb.clone())
                     .await
                 {
                     Ok(result) => cb.on_complete(result),

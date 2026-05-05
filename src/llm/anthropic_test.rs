@@ -10,7 +10,7 @@ fn test_request_serialization() {
         .system("You are helpful")
         .max_tokens(1024);
 
-    let anthropic_req = AnthropicRequest::from(&req);
+    let anthropic_req = try_into_anthropic_request(&req).unwrap();
 
     assert_eq!(anthropic_req.model, "claude-sonnet-4-20250514");
     assert_eq!(anthropic_req.max_tokens, 1024);
@@ -23,7 +23,7 @@ fn test_request_serialization() {
 fn test_request_json_format() {
     let req = Request::new("claude-sonnet-4-20250514").message(Message::user("Hello"));
 
-    let anthropic_req = AnthropicRequest::from(&req);
+    let anthropic_req = try_into_anthropic_request(&req).unwrap();
     let json = serde_json::to_value(&anthropic_req).unwrap();
 
     assert_eq!(json["model"], "claude-sonnet-4-20250514");
@@ -97,7 +97,7 @@ fn test_tool_use_response() {
 fn test_tool_result_message() {
     let msg = Message::tool_results(vec![ContentBlock::tool_result("tu_1", "Hello, Alice!")]);
 
-    let anthropic_msg = AnthropicMessage::from(&msg);
+    let anthropic_msg = try_anthropic_message(&msg).unwrap();
     let json = serde_json::to_value(&anthropic_msg).unwrap();
 
     assert_eq!(json["role"], "user");
@@ -123,4 +123,118 @@ fn test_client_from_env_missing() {
             std::env::set_var("ANTHROPIC_API_KEY", val);
         }
     }
+}
+
+#[test]
+fn test_anthropic_image_base64_serialization() {
+    let req = Request::new("claude-sonnet-4-20250514").message(Message::user_with(vec![
+        ContentBlock::text("what is this?"),
+        ContentBlock::image_base64("image/png", "aGVsbG8="),
+    ]));
+    let ar = try_into_anthropic_request(&req).unwrap();
+    let json = serde_json::to_value(&ar).unwrap();
+    let content = &json["messages"][0]["content"];
+    assert_eq!(content[0]["type"], "text");
+    assert_eq!(content[1]["type"], "image");
+    assert_eq!(content[1]["source"]["type"], "base64");
+    assert_eq!(content[1]["source"]["media_type"], "image/png");
+    assert_eq!(content[1]["source"]["data"], "aGVsbG8=");
+}
+
+#[test]
+fn test_anthropic_image_url_serialization() {
+    let req = Request::new("claude-sonnet-4-20250514").message(Message::user_with(vec![
+        ContentBlock::image_url("https://example.com/a.png"),
+    ]));
+    let ar = try_into_anthropic_request(&req).unwrap();
+    let json = serde_json::to_value(&ar).unwrap();
+    let src = &json["messages"][0]["content"][0]["source"];
+    assert_eq!(src["type"], "url");
+    assert_eq!(src["url"], "https://example.com/a.png");
+}
+
+#[test]
+fn test_anthropic_document_serialization() {
+    let req = Request::new("claude-sonnet-4-20250514").message(Message::user_with(vec![
+        ContentBlock::document_base64("application/pdf", "JVBE"),
+    ]));
+    let ar = try_into_anthropic_request(&req).unwrap();
+    let json = serde_json::to_value(&ar).unwrap();
+    assert_eq!(json["messages"][0]["content"][0]["type"], "document");
+    assert_eq!(
+        json["messages"][0]["content"][0]["source"]["type"],
+        "base64"
+    );
+    assert_eq!(
+        json["messages"][0]["content"][0]["source"]["media_type"],
+        "application/pdf"
+    );
+}
+
+#[test]
+fn test_anthropic_audio_errors() {
+    let req = Request::new("claude-sonnet-4-20250514").message(Message::user_with(vec![
+        ContentBlock::audio_base64("audio/wav", "UklGR"),
+    ]));
+    let result = try_into_anthropic_request(&req);
+    assert!(matches!(
+        result,
+        Err(crate::error::LlmError::UnsupportedMedia {
+            kind: MediaKind::Audio,
+            ..
+        })
+    ));
+}
+
+#[test]
+fn test_anthropic_video_errors() {
+    let req = Request::new("claude-sonnet-4-20250514").message(Message::user_with(vec![
+        ContentBlock::video_base64("video/mp4", "AAAAG"),
+    ]));
+    let result = try_into_anthropic_request(&req);
+    assert!(matches!(
+        result,
+        Err(crate::error::LlmError::UnsupportedMedia {
+            kind: MediaKind::Video,
+            ..
+        })
+    ));
+}
+
+#[test]
+fn test_anthropic_path_without_resolution_errors() {
+    // try_into_anthropic_request expects paths to be pre-resolved. If a Path
+    // is still present at serialize time, it's a programmer error.
+    let req = Request::new("claude-sonnet-4-20250514").message(Message::user_with(vec![
+        ContentBlock::image_path(std::path::PathBuf::from("/tmp/x.png")),
+    ]));
+    let result = try_into_anthropic_request(&req);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_anthropic_supports_media() {
+    let client = AnthropicClient::new("fake");
+    assert!(client.supports_media(MediaKind::Image));
+    assert!(client.supports_media(MediaKind::Document));
+    assert!(!client.supports_media(MediaKind::Audio));
+    assert!(!client.supports_media(MediaKind::Video));
+}
+
+#[test]
+fn test_anthropic_document_url_errors() {
+    // Anthropic does not support URL sources for documents — only images.
+    let req = Request::new("claude-sonnet-4-20250514").message(Message::user_with(vec![
+        ContentBlock::Media {
+            kind: MediaKind::Document,
+            source: MediaSource::Url("https://example.com/doc.pdf".to_string()),
+            mime_type: "application/pdf".to_string(),
+        },
+    ]));
+    let result = try_into_anthropic_request(&req);
+    assert!(
+        matches!(result, Err(crate::error::LlmError::Configuration(_))),
+        "expected Configuration error for Document+URL, got {:?}",
+        result
+    );
 }

@@ -43,12 +43,20 @@ impl CallbackLlmClient {
                     .collect::<Vec<_>>()
                     .join("\n");
 
+                // Extract any media attachments so on-device providers receive them.
+                let media: Vec<crate::media::FfiMedia> = m
+                    .content
+                    .iter()
+                    .filter_map(crate::media::FfiMedia::from_content_block)
+                    .collect();
+
                 ChatMessage {
                     role: match m.role {
                         mux::llm::Role::User => ChatRole::User,
                         mux::llm::Role::Assistant => ChatRole::Assistant,
                     },
                     content,
+                    media,
                 }
             })
             .collect();
@@ -158,6 +166,11 @@ impl LlmClient for CallbackLlmClient {
             })
         }))
     }
+
+    fn supports_media(&self, kind: mux::llm::MediaKind) -> bool {
+        let ffi_kind: crate::media::FfiMediaKind = kind.into();
+        self.provider.supports_media(ffi_kind)
+    }
 }
 
 #[cfg(test)]
@@ -187,6 +200,10 @@ mod tests {
                 error: None,
             }
         }
+
+        fn supports_media(&self, _kind: crate::media::FfiMediaKind) -> bool {
+            false
+        }
     }
 
     struct ToolUseProvider;
@@ -203,6 +220,10 @@ mod tests {
                 usage: LlmUsage::default(),
                 error: None,
             }
+        }
+
+        fn supports_media(&self, _kind: crate::media::FfiMediaKind) -> bool {
+            false
         }
     }
 
@@ -244,6 +265,10 @@ mod tests {
                 error: Some("Model failed to generate".to_string()),
             }
         }
+
+        fn supports_media(&self, _kind: crate::media::FfiMediaKind) -> bool {
+            false
+        }
     }
 
     #[tokio::test]
@@ -273,6 +298,10 @@ mod tests {
                 error: None,
             }
         }
+
+        fn supports_media(&self, _kind: crate::media::FfiMediaKind) -> bool {
+            false
+        }
     }
 
     #[tokio::test]
@@ -296,5 +325,83 @@ mod tests {
         let response = client.create_message(&request).await.unwrap();
 
         assert_eq!(response.model, "my-custom-model");
+    }
+
+    /// Verifies that a core `ContentBlock::Media` attached to a user message
+    /// is threaded through `convert_request` into the FFI `ChatMessage.media`
+    /// field and reaches the underlying `LlmProvider::generate` call.
+    #[tokio::test]
+    async fn test_callback_client_forwards_media() {
+        use crate::media::FfiMediaKind;
+        use std::sync::{Arc, Mutex};
+
+        struct MediaCapturingProvider {
+            captured: Arc<Mutex<Option<LlmRequest>>>,
+        }
+
+        impl LlmProvider for MediaCapturingProvider {
+            fn generate(&self, request: LlmRequest) -> LlmResponse {
+                *self.captured.lock().unwrap() = Some(request);
+                LlmResponse {
+                    text: "ok".to_string(),
+                    tool_calls: Vec::new(),
+                    usage: LlmUsage::default(),
+                    error: None,
+                }
+            }
+
+            fn supports_media(&self, _kind: crate::media::FfiMediaKind) -> bool {
+                false
+            }
+        }
+
+        let captured: Arc<Mutex<Option<LlmRequest>>> = Arc::new(Mutex::new(None));
+        let provider = MediaCapturingProvider {
+            captured: captured.clone(),
+        };
+        let client = CallbackLlmClient::new(Box::new(provider));
+
+        let request = Request::new("test-model").message(Message::user_with(vec![
+            ContentBlock::text("look at this"),
+            ContentBlock::image_base64("image/png", "aGVsbG8="),
+        ]));
+
+        let _ = client.create_message(&request).await.unwrap();
+
+        let guard = captured.lock().unwrap();
+        let req = guard
+            .as_ref()
+            .expect("provider should have captured a request");
+        assert_eq!(req.messages.len(), 1);
+        let msg = &req.messages[0];
+        assert_eq!(msg.media.len(), 1);
+        assert!(matches!(msg.media[0].kind, FfiMediaKind::Image));
+        assert_eq!(msg.media[0].mime_type, "image/png");
+    }
+
+    #[test]
+    fn test_callback_client_delegates_supports_media() {
+        use mux::llm::{LlmClient, MediaKind};
+
+        struct ImageOnlyProvider;
+        impl LlmProvider for ImageOnlyProvider {
+            fn generate(&self, _: LlmRequest) -> LlmResponse {
+                LlmResponse {
+                    text: String::new(),
+                    tool_calls: Vec::new(),
+                    usage: LlmUsage::default(),
+                    error: None,
+                }
+            }
+            fn supports_media(&self, kind: crate::media::FfiMediaKind) -> bool {
+                matches!(kind, crate::media::FfiMediaKind::Image)
+            }
+        }
+
+        let client = CallbackLlmClient::new(Box::new(ImageOnlyProvider));
+        assert!(client.supports_media(MediaKind::Image));
+        assert!(!client.supports_media(MediaKind::Document));
+        assert!(!client.supports_media(MediaKind::Audio));
+        assert!(!client.supports_media(MediaKind::Video));
     }
 }

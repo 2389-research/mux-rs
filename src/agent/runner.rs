@@ -177,15 +177,50 @@ impl SubAgent {
 
     /// Run the agent on a task and return the result.
     pub async fn run(&mut self, task: &str) -> Result<SubAgentResult, LlmError> {
+        self.run_internal(task.to_string(), Message::user(task))
+            .await
+    }
+
+    /// Run the agent on a pre-built user message containing content blocks
+    /// (text, media, etc.). Use this when the user turn includes attachments
+    /// that need to reach the provider alongside plain text.
+    ///
+    /// The derived task string used for logging/hooks is the concatenation
+    /// of any text blocks in `blocks`; non-text blocks are not stringified.
+    pub async fn run_with_blocks(
+        &mut self,
+        blocks: Vec<ContentBlock>,
+    ) -> Result<SubAgentResult, LlmError> {
+        // Derive a logical task string from text blocks for the AgentStart
+        // hook. Non-text blocks (media, etc.) are not stringified; they
+        // reach the provider via the Message itself.
+        let task = blocks
+            .iter()
+            .filter_map(|b| match b {
+                ContentBlock::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        self.run_internal(task, Message::user_with(blocks)).await
+    }
+
+    /// Shared body for `run` and `run_with_blocks`.
+    async fn run_internal(
+        &mut self,
+        task: String,
+        user_message: Message,
+    ) -> Result<SubAgentResult, LlmError> {
         // Fire AgentStart hook
         self.fire_hook(HookEvent::AgentStart {
             agent_id: self.agent_id.clone(),
-            task: task.to_string(),
+            task,
         })
         .await?;
 
         // Add the task as a user message
-        self.messages.push(Message::user(task));
+        self.messages.push(user_message);
 
         let mut iterations = 0;
 

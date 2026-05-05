@@ -338,6 +338,8 @@ pub enum ChatRole {
 pub struct ChatMessage {
     pub role: ChatRole,
     pub content: String,
+    /// Optional media attachments. Empty by default for text-only messages.
+    pub media: Vec<crate::media::FfiMedia>,
 }
 
 /// Tool definition for FFI - UniFFI-safe version of ToolDefinition.

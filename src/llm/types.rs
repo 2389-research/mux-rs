@@ -2,6 +2,7 @@
 // ABOUTME: tool definitions, requests, and responses.
 
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 
 /// Role of a message sender.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -18,6 +19,72 @@ pub enum StopReason {
     EndTurn,
     ToolUse,
     MaxTokens,
+}
+
+/// Kind of media payload in a `ContentBlock::Media`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MediaKind {
+    Image,
+    Document,
+    Audio,
+    Video,
+}
+
+impl std::fmt::Display for MediaKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            MediaKind::Image => write!(f, "image"),
+            MediaKind::Document => write!(f, "document"),
+            MediaKind::Audio => write!(f, "audio"),
+            MediaKind::Video => write!(f, "video"),
+        }
+    }
+}
+
+/// Source of media bytes. Base64 is inline; Url is remote; Path is local file.
+///
+/// Externally tagged (e.g. `{"base64": "..."}` rather than `{"kind":"base64","data":"..."}`)
+/// because serde does not support internally-tagged newtype variants over primitives.
+/// Providers use their own wire types, so this only affects on-disk JSON.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MediaSource {
+    Base64(String),
+    Url(String),
+    Path(PathBuf),
+}
+
+impl MediaSource {
+    /// Returns the discriminant of this source without the data payload.
+    /// Used for error reporting (e.g. "gemini does not support url source for image media").
+    pub fn kind(&self) -> MediaSourceKind {
+        match self {
+            MediaSource::Base64(_) => MediaSourceKind::Base64,
+            MediaSource::Url(_) => MediaSourceKind::Url,
+            MediaSource::Path(_) => MediaSourceKind::Path,
+        }
+    }
+}
+
+/// Discriminant of `MediaSource` without the data payload. Used in error
+/// types (e.g. `LlmError::UnsupportedSource`) so the variant can be named
+/// without cloning the underlying bytes/URL/path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MediaSourceKind {
+    Base64,
+    Url,
+    Path,
+}
+
+impl std::fmt::Display for MediaSourceKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            MediaSourceKind::Base64 => write!(f, "base64"),
+            MediaSourceKind::Url => write!(f, "url"),
+            MediaSourceKind::Path => write!(f, "path"),
+        }
+    }
 }
 
 /// A block of content within a message.
@@ -37,6 +104,11 @@ pub enum ContentBlock {
         content: String,
         #[serde(default)]
         is_error: bool,
+    },
+    Media {
+        kind: MediaKind,
+        source: MediaSource,
+        mime_type: String,
     },
 }
 
@@ -62,6 +134,66 @@ impl ContentBlock {
             content: error.into(),
             is_error: true,
         }
+    }
+
+    /// Generic media constructor with base64-encoded data.
+    pub fn media_base64(kind: MediaKind, mime: impl Into<String>, data: impl Into<String>) -> Self {
+        Self::Media {
+            kind,
+            source: MediaSource::Base64(data.into()),
+            mime_type: mime.into(),
+        }
+    }
+
+    /// Generic media constructor from a remote URL. Mime inferred by provider if empty.
+    pub fn media_url(kind: MediaKind, mime: impl Into<String>, url: impl Into<String>) -> Self {
+        Self::Media {
+            kind,
+            source: MediaSource::Url(url.into()),
+            mime_type: mime.into(),
+        }
+    }
+
+    /// Generic media constructor from a local file. Mime inferred by provider if empty.
+    pub fn media_path(kind: MediaKind, mime: impl Into<String>, path: impl Into<PathBuf>) -> Self {
+        Self::Media {
+            kind,
+            source: MediaSource::Path(path.into()),
+            mime_type: mime.into(),
+        }
+    }
+
+    /// Create an image content block from base64-encoded bytes.
+    pub fn image_base64(mime: impl Into<String>, data: impl Into<String>) -> Self {
+        Self::media_base64(MediaKind::Image, mime, data)
+    }
+    /// Create an image content block from a URL. Mime type is inferred by the provider from the URL extension at serialize time.
+    pub fn image_url(url: impl Into<String>) -> Self {
+        Self::Media {
+            kind: MediaKind::Image,
+            source: MediaSource::Url(url.into()),
+            mime_type: String::new(),
+        }
+    }
+    /// Create an image content block from a local file path. Mime type is inferred from the file extension when the provider resolves the path.
+    pub fn image_path(path: impl Into<PathBuf>) -> Self {
+        Self::Media {
+            kind: MediaKind::Image,
+            source: MediaSource::Path(path.into()),
+            mime_type: String::new(),
+        }
+    }
+    /// Create a document (e.g. PDF) content block from base64-encoded bytes.
+    pub fn document_base64(mime: impl Into<String>, data: impl Into<String>) -> Self {
+        Self::media_base64(MediaKind::Document, mime, data)
+    }
+    /// Create an audio content block from base64-encoded bytes.
+    pub fn audio_base64(mime: impl Into<String>, data: impl Into<String>) -> Self {
+        Self::media_base64(MediaKind::Audio, mime, data)
+    }
+    /// Create a video content block from base64-encoded bytes.
+    pub fn video_base64(mime: impl Into<String>, data: impl Into<String>) -> Self {
+        Self::media_base64(MediaKind::Video, mime, data)
     }
 }
 
@@ -94,6 +226,14 @@ impl Message {
         Self {
             role: Role::User,
             content: results,
+        }
+    }
+
+    /// Create a user message with pre-built content blocks (text, media, etc.).
+    pub fn user_with(content: Vec<ContentBlock>) -> Self {
+        Self {
+            role: Role::User,
+            content,
         }
     }
 }

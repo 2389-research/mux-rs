@@ -2,7 +2,9 @@
 // ABOUTME: Implements LlmClient trait for Gemini models.
 
 use super::client::StreamEvent;
-use super::{ContentBlock, Message, Request, Response, Role, StopReason, ToolDefinition, Usage};
+use super::{
+    ContentBlock, MediaSource, Message, Request, Response, Role, StopReason, ToolDefinition, Usage,
+};
 use crate::error::LlmError;
 use async_trait::async_trait;
 use futures::Stream;
@@ -43,6 +45,10 @@ pub struct GeminiPart {
     pub function_call: Option<GeminiFunctionCall>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub function_response: Option<GeminiFunctionResponse>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub inline_data: Option<GeminiInlineData>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file_data: Option<GeminiFileData>,
 }
 
 impl GeminiPart {
@@ -52,6 +58,8 @@ impl GeminiPart {
             text: Some(text.into()),
             function_call: None,
             function_response: None,
+            inline_data: None,
+            file_data: None,
         }
     }
 
@@ -64,6 +72,8 @@ impl GeminiPart {
                 args,
             }),
             function_response: None,
+            inline_data: None,
+            file_data: None,
         }
     }
 
@@ -76,6 +86,22 @@ impl GeminiPart {
                 name: name.into(),
                 response,
             }),
+            inline_data: None,
+            file_data: None,
+        }
+    }
+
+    /// Create an inline media part (base64 bytes + mime).
+    pub fn inline_data(mime_type: impl Into<String>, data: impl Into<String>) -> Self {
+        Self {
+            text: None,
+            function_call: None,
+            function_response: None,
+            inline_data: Some(GeminiInlineData {
+                mime_type: mime_type.into(),
+                data: data.into(),
+            }),
+            file_data: None,
         }
     }
 }
@@ -92,6 +118,22 @@ pub struct GeminiFunctionCall {
 pub struct GeminiFunctionResponse {
     pub name: String,
     pub response: serde_json::Value,
+}
+
+/// Gemini inline media (base64 data with mime type).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GeminiInlineData {
+    pub mime_type: String,
+    pub data: String,
+}
+
+/// Gemini file-backed media (Files API / GCS URI with mime type).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GeminiFileData {
+    pub mime_type: String,
+    pub file_uri: String,
 }
 
 /// Gemini generation config.
@@ -228,22 +270,44 @@ fn build_tool_name_lookup(messages: &[Message]) -> std::collections::HashMap<Str
     lookup
 }
 
-fn convert_message_to_content(
+/// Pre-flight validator: Gemini requires inline media bytes via `inline_data`
+/// and does not accept arbitrary public URLs (the Files API takes a `file_uri`,
+/// but that's a separate, Gemini-managed URI). `MediaSource::Url` is therefore
+/// rejected here before any serialization or network call. The library does
+/// not fetch URLs on the caller's behalf — callers that want to send a URL's
+/// bytes to Gemini must fetch themselves and pass `MediaSource::Base64`.
+fn validate_gemini_sources(req: &Request) -> Result<(), LlmError> {
+    for msg in &req.messages {
+        for block in &msg.content {
+            if let ContentBlock::Media { kind, source, .. } = block
+                && matches!(source, MediaSource::Url(_))
+            {
+                return Err(LlmError::UnsupportedSource {
+                    provider: "gemini",
+                    kind: *kind,
+                    source_kind: source.kind(),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+fn try_convert_message_to_content(
     msg: &Message,
     tool_name_lookup: &std::collections::HashMap<String, String>,
-) -> GeminiContent {
+) -> Result<GeminiContent, LlmError> {
     let role = match msg.role {
         Role::User => "user",
         Role::Assistant => "model",
     };
 
-    let parts: Vec<GeminiPart> = msg
-        .content
-        .iter()
-        .filter_map(|block| match block {
-            ContentBlock::Text { text } => Some(GeminiPart::text(text)),
+    let mut parts: Vec<GeminiPart> = Vec::new();
+    for block in &msg.content {
+        match block {
+            ContentBlock::Text { text } => parts.push(GeminiPart::text(text)),
             ContentBlock::ToolUse { name, input, .. } => {
-                Some(GeminiPart::function_call(name, input.clone()))
+                parts.push(GeminiPart::function_call(name, input.clone()));
             }
             ContentBlock::ToolResult {
                 tool_use_id,
@@ -256,64 +320,87 @@ fn convert_message_to_content(
                     .get(tool_use_id)
                     .cloned()
                     .unwrap_or_else(|| tool_use_id.clone());
-                Some(GeminiPart::function_response(
+                parts.push(GeminiPart::function_response(
                     name,
                     serde_json::json!({ "result": content }),
-                ))
+                ));
             }
-        })
-        .collect();
-
-    GeminiContent {
-        role: Some(role.to_string()),
-        parts,
-    }
-}
-
-impl From<&Request> for GeminiRequest {
-    fn from(req: &Request) -> Self {
-        // Build lookup for tool_use_id -> function name mapping
-        let tool_name_lookup = build_tool_name_lookup(&req.messages);
-
-        let contents: Vec<GeminiContent> = req
-            .messages
-            .iter()
-            .map(|msg| convert_message_to_content(msg, &tool_name_lookup))
-            .collect();
-
-        let system_instruction = req.system.as_ref().map(|s| GeminiContent {
-            role: None,
-            parts: vec![GeminiPart::text(s)],
-        });
-
-        let generation_config = if req.max_tokens.is_some() || req.temperature.is_some() {
-            Some(GeminiGenerationConfig {
-                max_output_tokens: req.max_tokens,
-                temperature: req.temperature,
-            })
-        } else {
-            None
-        };
-
-        let tools = if req.tools.is_empty() {
-            Vec::new()
-        } else {
-            vec![GeminiTool {
-                function_declarations: req
-                    .tools
-                    .iter()
-                    .map(GeminiFunctionDeclaration::from)
-                    .collect(),
-            }]
-        };
-
-        GeminiRequest {
-            contents,
-            system_instruction,
-            generation_config,
-            tools,
+            ContentBlock::Media {
+                kind: _,
+                source,
+                mime_type,
+            } => {
+                // Gemini supports all four kinds — no kind-based dispatch needed.
+                match source {
+                    MediaSource::Base64(data) => {
+                        if mime_type.is_empty() {
+                            return Err(LlmError::Configuration(
+                                "gemini media requires a non-empty mime_type".into(),
+                            ));
+                        }
+                        parts.push(GeminiPart::inline_data(mime_type, data));
+                    }
+                    MediaSource::Url(_) | MediaSource::Path(_) => {
+                        return Err(LlmError::Configuration(
+                            "gemini media: Url/Path must be resolved to Base64 before serialization".into(),
+                        ));
+                    }
+                }
+            }
         }
     }
+
+    Ok(GeminiContent {
+        role: Some(role.to_string()),
+        parts,
+    })
+}
+
+/// Build a `GeminiRequest` from a `Request`. Fallible because unresolved
+/// `MediaSource::Path`/`Url` are rejected — resolve `Path` via
+/// `resolve_request_media`, and reject `Url` pre-flight via
+/// `validate_gemini_sources`, before calling.
+pub fn try_into_gemini_request(req: &Request) -> Result<GeminiRequest, LlmError> {
+    let tool_name_lookup = build_tool_name_lookup(&req.messages);
+
+    let contents: Vec<GeminiContent> = req
+        .messages
+        .iter()
+        .map(|msg| try_convert_message_to_content(msg, &tool_name_lookup))
+        .collect::<Result<_, _>>()?;
+
+    let system_instruction = req.system.as_ref().map(|s| GeminiContent {
+        role: None,
+        parts: vec![GeminiPart::text(s)],
+    });
+
+    let generation_config = if req.max_tokens.is_some() || req.temperature.is_some() {
+        Some(GeminiGenerationConfig {
+            max_output_tokens: req.max_tokens,
+            temperature: req.temperature,
+        })
+    } else {
+        None
+    };
+
+    let tools = if req.tools.is_empty() {
+        Vec::new()
+    } else {
+        vec![GeminiTool {
+            function_declarations: req
+                .tools
+                .iter()
+                .map(GeminiFunctionDeclaration::from)
+                .collect(),
+        }]
+    };
+
+    Ok(GeminiRequest {
+        contents,
+        system_instruction,
+        generation_config,
+        tools,
+    })
 }
 
 fn parse_stop_reason(s: Option<&str>) -> StopReason {
@@ -385,8 +472,15 @@ fn parse_gemini_sse(line: &str) -> Option<GeminiResponse> {
 
 #[async_trait]
 impl super::client::LlmClient for GeminiClient {
+    fn supports_media(&self, _kind: super::MediaKind) -> bool {
+        // Gemini supports all four kinds (Image, Document, Audio, Video).
+        true
+    }
+
     async fn create_message(&self, req: &Request) -> Result<Response, LlmError> {
-        let gemini_req = GeminiRequest::from(req);
+        validate_gemini_sources(req)?;
+        let resolved = crate::llm::media::resolve_request_media(req, &self.http).await?;
+        let gemini_req = try_into_gemini_request(&resolved)?;
         let url = format!(
             "{}?key={}",
             self.endpoint(&req.model, "generateContent"),
@@ -418,7 +512,6 @@ impl super::client::LlmClient for GeminiClient {
         &self,
         req: &Request,
     ) -> Pin<Box<dyn Stream<Item = Result<StreamEvent, LlmError>> + Send + 'static>> {
-        let gemini_req = GeminiRequest::from(req);
         let url = format!(
             "{}?key={}&alt=sse",
             self.endpoint(&req.model, "streamGenerateContent"),
@@ -426,8 +519,13 @@ impl super::client::LlmClient for GeminiClient {
         );
         let model = req.model.clone();
         let http = self.http.clone();
+        let req = req.clone();
 
         Box::pin(async_stream::try_stream! {
+            validate_gemini_sources(&req)?;
+            let resolved = crate::llm::media::resolve_request_media(&req, &http).await?;
+            let gemini_req = try_into_gemini_request(&resolved)?;
+
             let response = http
                 .post(&url)
                 .header("Content-Type", "application/json")
@@ -573,7 +671,7 @@ mod tests {
             .system("Be helpful")
             .max_tokens(100);
 
-        let gemini_req = GeminiRequest::from(&req);
+        let gemini_req = try_into_gemini_request(&req).unwrap();
         assert_eq!(gemini_req.contents.len(), 1);
         assert!(gemini_req.system_instruction.is_some());
         assert!(gemini_req.generation_config.is_some());
@@ -595,5 +693,129 @@ mod tests {
         let gemini_func = GeminiFunctionDeclaration::from(&tool);
         assert_eq!(gemini_func.name, "get_weather");
         assert_eq!(gemini_func.description, "Get the weather");
+    }
+}
+
+#[cfg(test)]
+mod gemini_test {
+    use super::*;
+    use crate::llm::{ContentBlock, LlmClient, MediaKind, Message, Request, Role};
+
+    #[test]
+    fn test_gemini_image_base64_serialization() {
+        let req = Request::new("gemini-1.5-flash").message(Message::user_with(vec![
+            ContentBlock::image_base64("image/png", "aGVsbG8="),
+        ]));
+        let gr = try_into_gemini_request(&req).unwrap();
+        let json = serde_json::to_value(&gr).unwrap();
+        let part = &json["contents"][0]["parts"][0];
+        assert_eq!(part["inlineData"]["mimeType"], "image/png");
+        assert_eq!(part["inlineData"]["data"], "aGVsbG8=");
+    }
+
+    #[test]
+    fn test_gemini_document_base64_serialization() {
+        let req = Request::new("gemini-1.5-flash").message(Message::user_with(vec![
+            ContentBlock::document_base64("application/pdf", "JVBE"),
+        ]));
+        let gr = try_into_gemini_request(&req).unwrap();
+        let json = serde_json::to_value(&gr).unwrap();
+        let part = &json["contents"][0]["parts"][0];
+        assert_eq!(part["inlineData"]["mimeType"], "application/pdf");
+    }
+
+    #[test]
+    fn test_gemini_audio_base64_serialization() {
+        let req = Request::new("gemini-1.5-flash").message(Message::user_with(vec![
+            ContentBlock::audio_base64("audio/wav", "UklGR"),
+        ]));
+        let gr = try_into_gemini_request(&req).unwrap();
+        let json = serde_json::to_value(&gr).unwrap();
+        let part = &json["contents"][0]["parts"][0];
+        assert_eq!(part["inlineData"]["mimeType"], "audio/wav");
+    }
+
+    #[test]
+    fn test_gemini_video_base64_serialization() {
+        let req = Request::new("gemini-1.5-flash").message(Message::user_with(vec![
+            ContentBlock::video_base64("video/mp4", "AAAAG"),
+        ]));
+        let gr = try_into_gemini_request(&req).unwrap();
+        let json = serde_json::to_value(&gr).unwrap();
+        let part = &json["contents"][0]["parts"][0];
+        assert_eq!(part["inlineData"]["mimeType"], "video/mp4");
+    }
+
+    #[test]
+    fn test_gemini_url_rejected_preflight() {
+        // validate_gemini_sources rejects Url sources before any serialization
+        // or network call happens. The underlying try_into_gemini_request still
+        // has a defensive Configuration arm for Url sources, but it should
+        // never be reached in practice.
+        let req = Request::new("gemini-1.5-flash").message(Message::user_with(vec![
+            ContentBlock::image_url("https://example.com/a.png"),
+        ]));
+        let result = validate_gemini_sources(&req);
+        assert!(matches!(
+            result,
+            Err(crate::error::LlmError::UnsupportedSource {
+                provider: "gemini",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn test_gemini_supports_media_all_kinds() {
+        let c = GeminiClient::new("fake");
+        assert!(c.supports_media(MediaKind::Image));
+        assert!(c.supports_media(MediaKind::Document));
+        assert!(c.supports_media(MediaKind::Audio));
+        assert!(c.supports_media(MediaKind::Video));
+    }
+
+    #[test]
+    fn test_gemini_assistant_role_maps_to_model() {
+        let req = Request::new("gemini-1.5-flash").messages(vec![
+            Message::user("look"),
+            Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::text("sure")],
+            },
+        ]);
+        let gr = try_into_gemini_request(&req).unwrap();
+        let json = serde_json::to_value(&gr).unwrap();
+        assert_eq!(json["contents"][0]["role"], "user");
+        assert_eq!(json["contents"][1]["role"], "model");
+    }
+
+    #[test]
+    fn test_gemini_mixed_text_and_media_preserves_order() {
+        let req = Request::new("gemini-1.5-flash").message(Message::user_with(vec![
+            ContentBlock::text("first"),
+            ContentBlock::image_base64("image/png", "aGVsbG8="),
+            ContentBlock::text("last"),
+        ]));
+        let gr = try_into_gemini_request(&req).unwrap();
+        let json = serde_json::to_value(&gr).unwrap();
+        let parts = &json["contents"][0]["parts"];
+        assert_eq!(parts.as_array().unwrap().len(), 3);
+        assert_eq!(parts[0]["text"], "first");
+        assert_eq!(parts[1]["inlineData"]["mimeType"], "image/png");
+        assert_eq!(parts[2]["text"], "last");
+    }
+
+    #[test]
+    fn test_gemini_multiple_media_blocks_all_present() {
+        let req = Request::new("gemini-1.5-flash").message(Message::user_with(vec![
+            ContentBlock::image_base64("image/png", "aaaa"),
+            ContentBlock::audio_base64("audio/wav", "bbbb"),
+        ]));
+        let gr = try_into_gemini_request(&req).unwrap();
+        let json = serde_json::to_value(&gr).unwrap();
+        let parts = &json["contents"][0]["parts"];
+        assert_eq!(parts.as_array().unwrap().len(), 2);
+        assert_eq!(parts[0]["inlineData"]["mimeType"], "image/png");
+        assert_eq!(parts[1]["inlineData"]["mimeType"], "audio/wav");
     }
 }
