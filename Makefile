@@ -42,3 +42,24 @@ check: fmt clippy test
 # Clean build artifacts
 clean:
 	cargo clean
+
+# ----- release -----
+# Cut a release. Updates both Cargo.toml versions in lockstep, runs tests,
+# commits, and creates a vX.Y.Z tag. Does NOT push — review first, then:
+#   git push origin main --tags
+#
+# Requires: cargo install cargo-release
+
+.PHONY: release-patch release-minor release-major release-dry-run
+
+release-patch:
+	cargo release patch --execute --no-confirm
+
+release-minor:
+	cargo release minor --execute --no-confirm
+
+release-major:
+	cargo release major --execute --no-confirm
+
+release-dry-run:
+	cargo release patch

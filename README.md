@@ -76,6 +76,27 @@ async fn main() -> Result<(), mux::MuxError> {
 
 Under active development. API subject to change.
 
+## Releasing
+
+Cut a release with one of:
+
+```sh
+make release-patch    # 0.13.0 -> 0.13.1
+make release-minor    # 0.13.0 -> 0.14.0
+make release-major    # 0.13.0 -> 1.0.0
+make release-dry-run  # show what a patch release would do
+```
+
+This bumps both `Cargo.toml` and `mux-ffi/Cargo.toml` (lockstep), runs the full test suite, creates a `chore(release): vX.Y.Z` commit, and tags `vX.Y.Z`. Tag and commit are NOT pushed automatically — review, then:
+
+```sh
+git push origin main --tags
+```
+
+CI's `version-check` workflow verifies on every tag push that both workspace crate versions match the tag. If you ever bypass `cargo-release` and tag manually, the build will fail.
+
+Requires `cargo install cargo-release` once.
+
 ## License
 
 MIT

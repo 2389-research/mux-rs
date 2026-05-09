@@ -1,0 +1,34 @@
+# ABOUTME: Verifies that on a tag push (vX.Y.Z), both workspace crate versions
+# ABOUTME: match the tag. Fails the build if they drift, catching manual tag
+# ABOUTME: mistakes that bypass cargo-release.
+
+name: Version Check
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  verify-versions:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify Cargo.toml versions match tag
+        run: |
+          set -e
+          TAG="${GITHUB_REF#refs/tags/v}"
+          ROOT_VER=$(grep -m1 '^version' Cargo.toml | sed 's/version = "\(.*\)"/\1/')
+          FFI_VER=$(grep -m1 '^version' mux-ffi/Cargo.toml | sed 's/version = "\(.*\)"/\1/')
+          echo "Tag: $TAG"
+          echo "mux: $ROOT_VER"
+          echo "mux-ffi: $FFI_VER"
+          if [ "$TAG" != "$ROOT_VER" ]; then
+            echo "ERROR: tag $TAG does not match Cargo.toml version $ROOT_VER" >&2
+            exit 1
+          fi
+          if [ "$TAG" != "$FFI_VER" ]; then
+            echo "ERROR: tag $TAG does not match mux-ffi/Cargo.toml version $FFI_VER" >&2
+            exit 1
+          fi
+          echo "OK: all versions match tag $TAG"
