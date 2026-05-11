@@ -23,8 +23,8 @@ test:
 build:
 	cargo build --all-targets
 
-# Build release
-release:
+# Build release-mode binaries. (To cut a versioned release, see release-patch et al. below.)
+build-release:
 	cargo build --release --all-targets
 
 # Run clippy
