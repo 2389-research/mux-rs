@@ -6,6 +6,8 @@ use std::sync::Arc;
 
 use tokio::sync::RwLock;
 
+use crate::llm::SystemBlock;
+
 /// Definition of an agent type that can be spawned.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
@@ -19,6 +21,12 @@ pub struct AgentDefinition {
 
     /// System prompt for this agent.
     pub system_prompt: String,
+
+    /// Optional structured system prompt with per-block cache_control support.
+    /// When non-empty, takes precedence over `system_prompt` at request-build
+    /// time. Use for Anthropic prompt caching. Other providers concatenate
+    /// the block texts (cache_control silently dropped).
+    pub system_blocks: Vec<SystemBlock>,
 
     /// Tools this agent is allowed to use (allowlist).
     /// If None, inherits all tools from parent registry.
@@ -40,6 +48,13 @@ pub struct AgentDefinition {
     /// When true, the agent uses `create_message_stream()` and fires
     /// `StreamDelta` / `StreamUsage` hooks for real-time token delivery.
     pub streaming: bool,
+
+    /// Whether to mark tool definitions with cache_control: ephemeral.
+    /// When true, the entire tool block is cached on the Anthropic side and
+    /// subsequent calls within the cache window incur ~90% lower cost on the
+    /// tool-definitions portion of the input. Ignored by non-Anthropic
+    /// providers.
+    pub cache_tools: bool,
 }
 
 impl AgentDefinition {
@@ -49,12 +64,34 @@ impl AgentDefinition {
             agent_type: agent_type.into(),
             model: None,
             system_prompt: system_prompt.into(),
+            system_blocks: Vec::new(),
             allowed_tools: None,
             denied_tools: Vec::new(),
             fork_context: false,
             max_iterations: 10,
             streaming: false,
+            cache_tools: false,
         }
+    }
+
+    /// Set structured system-prompt blocks with per-block cache_control.
+    /// When set (non-empty), takes precedence over `system_prompt` at
+    /// request-build time.
+    pub fn system_blocks(mut self, blocks: impl IntoIterator<Item = SystemBlock>) -> Self {
+        self.system_blocks = blocks.into_iter().collect();
+        self
+    }
+
+    /// Append a single structured system-prompt block.
+    pub fn system_block(mut self, block: SystemBlock) -> Self {
+        self.system_blocks.push(block);
+        self
+    }
+
+    /// Mark tool definitions as cacheable (Anthropic prompt caching).
+    pub fn cache_tools(mut self, enabled: bool) -> Self {
+        self.cache_tools = enabled;
+        self
     }
 
     /// Set the model for this agent.

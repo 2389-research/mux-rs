@@ -253,10 +253,27 @@ impl SubAgent {
                 )
             })?;
 
-            let request = Request::new(&model)
-                .system(&self.definition.system_prompt)
+            // System prompt: prefer system_blocks (cacheable) when present,
+            // otherwise fall back to the legacy single-string system_prompt.
+            let mut request = Request::new(&model);
+            if !self.definition.system_blocks.is_empty() {
+                request = request.system_blocks(self.definition.system_blocks.clone());
+            } else {
+                request = request.system(&self.definition.system_prompt);
+            }
+
+            // Tools: optionally mark cache_control: ephemeral on every tool
+            // definition so the Anthropic side caches the tool block.
+            let mut tool_defs = self.tools.to_definitions().await;
+            if self.definition.cache_tools {
+                for t in &mut tool_defs {
+                    t.cache_control = Some(crate::llm::CacheControl::ephemeral());
+                }
+            }
+
+            let request = request
                 .messages(self.messages.clone())
-                .tools(self.tools.to_definitions().await)
+                .tools(tool_defs)
                 .max_tokens(4096);
 
             // Call the LLM
