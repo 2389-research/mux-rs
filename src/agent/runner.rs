@@ -269,7 +269,16 @@ impl SubAgent {
             // create N breakpoints; Anthropic caps at 4 per request and
             // rejects with HTTP 400. Marking just the last tool caches the
             // entire tool block with a single breakpoint.
+            //
+            // ORDER MATTERS for caching: the underlying tool registry is
+            // backed by a HashMap, so `to_definitions()` returns tools in
+            // non-deterministic order. We sort by name here so the same
+            // tool ends up "last" across calls — without this, the cache
+            // breakpoint position shifts between requests and the cache
+            // never hits (every call appears to be cacheable-content-changed
+            // to Anthropic's deduplicator).
             let mut tool_defs = self.tools.to_definitions().await;
+            tool_defs.sort_by(|a, b| a.name.cmp(&b.name));
             if self.definition.cache_tools
                 && let Some(last) = tool_defs.last_mut()
             {
