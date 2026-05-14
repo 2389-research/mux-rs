@@ -262,13 +262,18 @@ impl SubAgent {
                 request = request.system(&self.definition.system_prompt);
             }
 
-            // Tools: optionally mark cache_control: ephemeral on every tool
-            // definition so the Anthropic side caches the tool block.
+            // Tools: optionally mark cache_control: ephemeral on the LAST tool
+            // definition. Anthropic prompt-caching uses cache breakpoints —
+            // a single cache_control marker caches EVERYTHING BEFORE IT (in
+            // request order) as one cached unit. Marking every tool would
+            // create N breakpoints; Anthropic caps at 4 per request and
+            // rejects with HTTP 400. Marking just the last tool caches the
+            // entire tool block with a single breakpoint.
             let mut tool_defs = self.tools.to_definitions().await;
-            if self.definition.cache_tools {
-                for t in &mut tool_defs {
-                    t.cache_control = Some(crate::llm::CacheControl::ephemeral());
-                }
+            if self.definition.cache_tools
+                && let Some(last) = tool_defs.last_mut()
+            {
+                last.cache_control = Some(crate::llm::CacheControl::ephemeral());
             }
 
             let request = request
