@@ -607,6 +607,7 @@ impl MuxEngine {
                 name: tool.name().to_string(),
                 description: tool.description().to_string(),
                 input_schema: tool.schema(),
+                cache_control: None,
             });
         }
 
@@ -618,6 +619,7 @@ impl MuxEngine {
                     name: tool.name().to_string(),
                     description: tool.description().to_string(),
                     input_schema: tool.schema(),
+                    cache_control: None,
                 });
             }
         }
@@ -657,6 +659,7 @@ impl MuxEngine {
                     },
                     "required": ["task", "description"]
                 }),
+                cache_control: None,
             });
         }
 
@@ -669,6 +672,7 @@ impl MuxEngine {
                         name: format!("{}:{}", handle.server_name, mcp_tool.name),
                         description: mcp_tool.description.clone(),
                         input_schema: mcp_tool.input_schema.clone(),
+                        cache_control: None,
                     });
                 }
             }
