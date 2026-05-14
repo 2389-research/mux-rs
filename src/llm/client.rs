@@ -12,8 +12,15 @@ use crate::error::LlmError;
 /// Event types for streaming responses.
 #[derive(Debug, Clone)]
 pub enum StreamEvent {
-    /// Message creation started.
-    MessageStart { id: String, model: String },
+    /// Message creation started. Anthropic includes initial usage with
+    /// `input_tokens` + cache fields here (and `output_tokens: 0`); the
+    /// `output_tokens` get updated in subsequent `MessageDelta` events.
+    /// Providers that don't surface initial usage emit a default Usage.
+    MessageStart {
+        id: String,
+        model: String,
+        usage: super::Usage,
+    },
 
     /// A content block started.
     ContentBlockStart {

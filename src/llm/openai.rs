@@ -509,10 +509,10 @@ fn uses_max_completion_tokens(model: &str) -> bool {
 pub fn try_into_openai_request(req: &Request) -> Result<OpenAIRequest, LlmError> {
     let mut messages: Vec<OpenAIMessage> = Vec::new();
 
-    if let Some(system) = req.system.as_ref() {
+    if let Some(system) = req.effective_system() {
         messages.push(OpenAIMessage {
             role: "system".to_string(),
-            content: Some(OpenAIContent::String(system.clone())),
+            content: Some(OpenAIContent::String(system)),
             tool_calls: None,
             tool_call_id: None,
         });
@@ -699,6 +699,7 @@ impl super::client::LlmClient for OpenAIClient {
                             yield StreamEvent::MessageStart {
                                 id: chunk.id.clone(),
                                 model: chunk.model.clone(),
+                                usage: crate::llm::Usage::default(),
                             };
                             message_started = true;
                         }
@@ -844,6 +845,7 @@ mod openai_test {
                     "location": {"type": "string"}
                 }
             }),
+            cache_control: None,
         };
 
         let openai_tool = OpenAITool::from(&tool);

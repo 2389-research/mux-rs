@@ -253,10 +253,23 @@ impl SubAgent {
                 )
             })?;
 
-            let request = Request::new(&model)
-                .system(&self.definition.system_prompt)
+            // System prompt: prefer system_blocks (cacheable) when present,
+            // otherwise fall back to the legacy single-string system_prompt.
+            let mut request = Request::new(&model);
+            if !self.definition.system_blocks.is_empty() {
+                request = request.system_blocks(self.definition.system_blocks.clone());
+            } else {
+                request = request.system(&self.definition.system_prompt);
+            }
+
+            // Tools: deterministically order + optionally mark cacheable.
+            // See `finalize_tool_defs` for the rationale.
+            let tool_defs =
+                finalize_tool_defs(self.tools.to_definitions().await, self.definition.cache_tools);
+
+            let request = request
                 .messages(self.messages.clone())
-                .tools(self.tools.to_definitions().await)
+                .tools(tool_defs)
                 .max_tokens(4096);
 
             // Call the LLM
@@ -402,9 +415,16 @@ impl SubAgent {
                 StreamEvent::MessageStart {
                     id: msg_id,
                     model: msg_model,
+                    usage: start_usage,
                 } => {
                     message_id = msg_id.clone();
                     model = msg_model.clone();
+                    // Anthropic carries the cache_creation_input_tokens and
+                    // cache_read_input_tokens in message_start, with
+                    // output_tokens=0. MessageDelta later updates output_tokens
+                    // and re-sends input/cache. We seed usage here so we don't
+                    // lose cache info if a provider only sends it in start.
+                    usage = start_usage.clone();
                 }
                 StreamEvent::ContentBlockDelta { text, .. } if !accumulator.in_tool_use() => {
                     // Fire StreamDelta hook for text tokens
@@ -419,11 +439,25 @@ impl SubAgent {
                     usage: delta_usage,
                 } => {
                     stop_reason = *sr;
-                    usage = delta_usage.clone();
+                    // Merge with usage from MessageStart: take MessageDelta
+                    // values that are non-zero (it has the final output_tokens
+                    // and may or may not re-send cache fields), preserve any
+                    // non-zero values from MessageStart otherwise.
+                    let mut merged = delta_usage.clone();
+                    if merged.input_tokens == 0 {
+                        merged.input_tokens = usage.input_tokens;
+                    }
+                    if merged.cache_read_tokens == 0 {
+                        merged.cache_read_tokens = usage.cache_read_tokens;
+                    }
+                    if merged.cache_write_tokens == 0 {
+                        merged.cache_write_tokens = usage.cache_write_tokens;
+                    }
+                    usage = merged;
                     // Fire StreamUsage hook
                     self.fire_hook(HookEvent::StreamUsage {
                         agent_id: self.agent_id.clone(),
-                        usage: delta_usage.clone(),
+                        usage: usage.clone(),
                     })
                     .await?;
                 }
@@ -498,6 +532,34 @@ impl SubAgent {
     }
 }
 
+/// Sort tool definitions deterministically (by name) and, when requested,
+/// mark the LAST tool with `cache_control: ephemeral`.
+///
+/// Anthropic prompt-caching uses cache *breakpoints*: a single `cache_control`
+/// marker caches EVERYTHING BEFORE IT (in request order) as one cached unit.
+/// Marking every tool would create N breakpoints; Anthropic caps at 4 per
+/// request and rejects with HTTP 400. Marking just the last tool caches the
+/// entire tool block with one breakpoint.
+///
+/// ORDER MATTERS for caching: the underlying tool registry is backed by a
+/// HashMap, so `to_definitions()` returns tools in non-deterministic order
+/// across calls. Without the sort, the "last" tool varies between requests
+/// and the cache breakpoint position shifts — Anthropic's deduplicator sees
+/// different content at the breakpoint and treats each call as cache-changed,
+/// defeating most hits.
+fn finalize_tool_defs(
+    mut tool_defs: Vec<crate::llm::ToolDefinition>,
+    cache_tools: bool,
+) -> Vec<crate::llm::ToolDefinition> {
+    tool_defs.sort_by(|a, b| a.name.cmp(&b.name));
+    if cache_tools
+        && let Some(last) = tool_defs.last_mut()
+    {
+        last.cache_control = Some(crate::llm::CacheControl::ephemeral());
+    }
+    tool_defs
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -522,5 +584,93 @@ mod tests {
         assert_eq!(result.iterations, 2);
         assert_eq!(result.usage.cache_read_tokens, 20);
         assert_eq!(result.usage.cache_write_tokens, 10);
+    }
+
+    // ----- finalize_tool_defs: deterministic ordering + last-tool cache marking -----
+
+    fn td(name: &str) -> crate::llm::ToolDefinition {
+        crate::llm::ToolDefinition {
+            name: name.to_string(),
+            description: format!("desc for {}", name),
+            input_schema: serde_json::json!({}),
+            cache_control: None,
+        }
+    }
+
+    #[test]
+    fn finalize_tool_defs_sorts_by_name() {
+        // Sort must be deterministic regardless of input order, since the
+        // upstream registry is HashMap-backed. Tests the CodeRabbit catch.
+        let input = vec![td("write"), td("read_state"), td("apply"), td("emit_narration")];
+        let out = finalize_tool_defs(input, false);
+        let names: Vec<&str> = out.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["apply", "emit_narration", "read_state", "write"],
+            "tools must be sorted alphabetically by name"
+        );
+    }
+
+    #[test]
+    fn finalize_tool_defs_marks_only_last_when_cache_tools_true() {
+        // Anthropic limits requests to 4 cache_control breakpoints; we must
+        // mark only one. Tests the original "mark all tools" bug fix.
+        let input = vec![td("a"), td("b"), td("c"), td("d")];
+        let out = finalize_tool_defs(input, true);
+        assert!(out[0].cache_control.is_none(), "first tool must NOT be marked");
+        assert!(out[1].cache_control.is_none(), "second tool must NOT be marked");
+        assert!(out[2].cache_control.is_none(), "third tool must NOT be marked");
+        assert!(
+            out[3].cache_control.is_some(),
+            "last tool MUST be marked when cache_tools=true"
+        );
+        let n_marked = out.iter().filter(|t| t.cache_control.is_some()).count();
+        assert_eq!(n_marked, 1, "exactly one tool must be marked");
+    }
+
+    #[test]
+    fn finalize_tool_defs_marks_nothing_when_cache_tools_false() {
+        let input = vec![td("a"), td("b"), td("c")];
+        let out = finalize_tool_defs(input, false);
+        assert!(
+            out.iter().all(|t| t.cache_control.is_none()),
+            "no tool should be marked when cache_tools=false"
+        );
+    }
+
+    #[test]
+    fn finalize_tool_defs_handles_empty_list() {
+        // last_mut() returns None on empty; must not panic.
+        let out = finalize_tool_defs(vec![], true);
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn finalize_tool_defs_single_tool_with_cache_tools_marks_it() {
+        let out = finalize_tool_defs(vec![td("only")], true);
+        assert_eq!(out.len(), 1);
+        assert!(out[0].cache_control.is_some());
+    }
+
+    #[test]
+    fn finalize_tool_defs_is_idempotent_across_input_permutations() {
+        // Different input orders must produce IDENTICAL output (same last
+        // tool marked). This is the property that makes caching actually hit.
+        let perm_a = vec![td("alpha"), td("beta"), td("gamma")];
+        let perm_b = vec![td("gamma"), td("alpha"), td("beta")];
+        let perm_c = vec![td("beta"), td("gamma"), td("alpha")];
+
+        let out_a = finalize_tool_defs(perm_a, true);
+        let out_b = finalize_tool_defs(perm_b, true);
+        let out_c = finalize_tool_defs(perm_c, true);
+
+        let last_marked = |v: &Vec<crate::llm::ToolDefinition>| {
+            v.iter()
+                .find(|t| t.cache_control.is_some())
+                .map(|t| t.name.clone())
+        };
+        assert_eq!(last_marked(&out_a), Some("gamma".to_string()));
+        assert_eq!(last_marked(&out_b), Some("gamma".to_string()));
+        assert_eq!(last_marked(&out_c), Some("gamma".to_string()));
     }
 }

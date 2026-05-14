@@ -3,7 +3,7 @@
 
 use super::client::StreamEvent;
 use super::media::resolve_request_media;
-use super::{ContentBlock, Message, Request, Response, StopReason, ToolDefinition, Usage};
+use super::{CacheControl, ContentBlock, Message, Request, Response, StopReason, ToolDefinition, Usage};
 use crate::error::LlmError;
 use async_trait::async_trait;
 use futures::Stream;
@@ -13,6 +13,27 @@ use std::pin::Pin;
 const ANTHROPIC_DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 
+/// System prompt field. Either a plain string (legacy) or an array of typed
+/// content blocks with optional cache_control markers (Anthropic prompt
+/// caching). Serializes via the `untagged` enum so the JSON shape on the
+/// wire is exactly what the Anthropic API expects.
+#[derive(Debug, Serialize)]
+#[serde(untagged)]
+pub enum AnthropicSystem {
+    String(String),
+    Blocks(Vec<AnthropicSystemBlock>),
+}
+
+/// One typed system-prompt block. `block_type` is always `"text"` for now.
+#[derive(Debug, Serialize)]
+pub struct AnthropicSystemBlock {
+    #[serde(rename = "type")]
+    pub block_type: String,
+    pub text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_control: Option<CacheControl>,
+}
+
 /// Anthropic API request format.
 #[derive(Debug, Serialize)]
 pub struct AnthropicRequest {
@@ -20,7 +41,7 @@ pub struct AnthropicRequest {
     pub messages: Vec<AnthropicMessage>,
     pub max_tokens: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub system: Option<String>,
+    pub system: Option<AnthropicSystem>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f64>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -76,6 +97,8 @@ pub struct AnthropicTool {
     pub name: String,
     pub description: String,
     pub input_schema: serde_json::Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_control: Option<CacheControl>,
 }
 
 /// Anthropic API response format.
@@ -149,6 +172,13 @@ pub enum AnthropicStreamEvent {
 pub struct AnthropicMessageStart {
     pub id: String,
     pub model: String,
+    /// Initial usage stats. Anthropic includes input_tokens +
+    /// cache_creation_input_tokens + cache_read_input_tokens here, but
+    /// only output_tokens: 0 in message_start. The final output_tokens
+    /// shows up in message_delta. Optional because not all stream events
+    /// from all providers carry it.
+    #[serde(default)]
+    pub usage: Option<AnthropicUsage>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -329,7 +359,29 @@ impl From<&ToolDefinition> for AnthropicTool {
             name: tool.name.clone(),
             description: tool.description.clone(),
             input_schema: tool.input_schema.clone(),
+            cache_control: tool.cache_control.clone(),
         }
+    }
+}
+
+/// Resolve a [`Request`]'s system prompt into the Anthropic wire shape.
+/// When `system_blocks` is non-empty it takes precedence and serializes as an
+/// array of typed blocks (preserving cache_control). Otherwise the plain
+/// `system` string is used. Returns None when both are empty.
+fn build_anthropic_system(req: &Request) -> Option<AnthropicSystem> {
+    if !req.system_blocks.is_empty() {
+        let blocks = req
+            .system_blocks
+            .iter()
+            .map(|b| AnthropicSystemBlock {
+                block_type: "text".to_string(),
+                text: b.text.clone(),
+                cache_control: b.cache_control.clone(),
+            })
+            .collect();
+        Some(AnthropicSystem::Blocks(blocks))
+    } else {
+        req.system.clone().map(AnthropicSystem::String)
     }
 }
 
@@ -343,7 +395,7 @@ pub fn try_into_anthropic_request(req: &Request) -> Result<AnthropicRequest, Llm
         model: req.model.clone(),
         messages,
         max_tokens: req.max_tokens.unwrap_or(4096),
-        system: req.system.clone(),
+        system: build_anthropic_system(req),
         temperature: req.temperature,
         tools: req.tools.iter().map(AnthropicTool::from).collect(),
         stream: None,
@@ -389,10 +441,23 @@ fn parse_sse_event(event_str: &str) -> Option<StreamEvent> {
     let anthropic_event: AnthropicStreamEvent = serde_json::from_str(&data).ok()?;
 
     match anthropic_event {
-        AnthropicStreamEvent::MessageStart { message } => Some(StreamEvent::MessageStart {
-            id: message.id,
-            model: message.model,
-        }),
+        AnthropicStreamEvent::MessageStart { message } => {
+            let usage = message
+                .usage
+                .as_ref()
+                .map(|u| Usage {
+                    input_tokens: u.input_tokens,
+                    output_tokens: u.output_tokens,
+                    cache_read_tokens: u.cache_read_input_tokens.unwrap_or(0),
+                    cache_write_tokens: u.cache_creation_input_tokens.unwrap_or(0),
+                })
+                .unwrap_or_default();
+            Some(StreamEvent::MessageStart {
+                id: message.id,
+                model: message.model,
+                usage,
+            })
+        }
         AnthropicStreamEvent::ContentBlockStart {
             index,
             content_block,
@@ -417,7 +482,8 @@ fn parse_sse_event(event_str: &str) -> Option<StreamEvent> {
             usage: Usage {
                 input_tokens: usage.input_tokens,
                 output_tokens: usage.output_tokens,
-                ..Default::default()
+                cache_read_tokens: usage.cache_read_input_tokens.unwrap_or(0),
+                cache_write_tokens: usage.cache_creation_input_tokens.unwrap_or(0),
             },
         }),
         AnthropicStreamEvent::MessageStop => Some(StreamEvent::MessageStop),
@@ -517,5 +583,97 @@ impl super::client::LlmClient for AnthropicClient {
     fn supports_media(&self, kind: super::MediaKind) -> bool {
         use super::MediaKind;
         matches!(kind, MediaKind::Image | MediaKind::Document)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SSE parser tests — regression guards for cache_creation/read extraction
+// from streaming responses. The non-streaming path of `create_message`
+// already pulls these fields; before this branch the streaming path
+// silently zeroed them out (everything `..Default::default()`), which made
+// it look like caching was inactive on streaming agents.
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod sse_parser_tests {
+    use super::*;
+
+    #[test]
+    fn parse_sse_event_extracts_cache_tokens_from_message_start() {
+        // Anthropic carries the cache_creation_input_tokens and
+        // cache_read_input_tokens fields on message_start (with
+        // output_tokens=0). Verify parse_sse_event surfaces them via
+        // StreamEvent::MessageStart.usage.
+        let raw = r#"event: message_start
+data: {"type":"message_start","message":{"id":"msg_01ABC","model":"claude-sonnet-4-5","usage":{"input_tokens":1500,"output_tokens":0,"cache_creation_input_tokens":4747,"cache_read_input_tokens":2200}}}"#;
+
+        let parsed = parse_sse_event(raw).expect("should parse message_start");
+        match parsed {
+            StreamEvent::MessageStart { id, model, usage } => {
+                assert_eq!(id, "msg_01ABC");
+                assert_eq!(model, "claude-sonnet-4-5");
+                assert_eq!(usage.input_tokens, 1500);
+                assert_eq!(usage.output_tokens, 0);
+                assert_eq!(usage.cache_write_tokens, 4747, "cache_creation_input_tokens must map to cache_write_tokens");
+                assert_eq!(usage.cache_read_tokens, 2200, "cache_read_input_tokens must map to cache_read_tokens");
+            }
+            other => panic!("expected MessageStart, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_sse_event_extracts_cache_tokens_from_message_delta() {
+        // The streaming bug was here: previous impl built Usage with
+        // `..Default::default()` instead of pulling cache_read_input_tokens
+        // and cache_creation_input_tokens. This regression-guards the fix.
+        let raw = r#"event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input_tokens":1500,"output_tokens":120,"cache_creation_input_tokens":3000,"cache_read_input_tokens":1100}}"#;
+
+        let parsed = parse_sse_event(raw).expect("should parse message_delta");
+        match parsed {
+            StreamEvent::MessageDelta { usage, .. } => {
+                assert_eq!(usage.output_tokens, 120);
+                assert_eq!(usage.cache_write_tokens, 3000, "MessageDelta must surface cache_creation_input_tokens");
+                assert_eq!(usage.cache_read_tokens, 1100, "MessageDelta must surface cache_read_input_tokens");
+            }
+            other => panic!("expected MessageDelta, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_sse_event_message_start_without_usage_defaults_to_zero() {
+        // Non-Anthropic providers (or older Anthropic format) may omit usage
+        // on message_start. Verify we default to Usage::default() instead of
+        // panicking on the missing field.
+        let raw = r#"event: message_start
+data: {"type":"message_start","message":{"id":"msg_x","model":"claude-x"}}"#;
+
+        let parsed = parse_sse_event(raw).expect("should parse message_start without usage");
+        match parsed {
+            StreamEvent::MessageStart { usage, .. } => {
+                assert_eq!(usage.input_tokens, 0);
+                assert_eq!(usage.cache_write_tokens, 0);
+                assert_eq!(usage.cache_read_tokens, 0);
+            }
+            other => panic!("expected MessageStart, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_sse_event_message_delta_without_cache_fields_defaults_to_zero() {
+        // Backward-compat: pre-caching responses don't include cache fields.
+        // Should parse cleanly with cache_write/cache_read = 0.
+        let raw = r#"event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input_tokens":100,"output_tokens":50}}"#;
+
+        let parsed = parse_sse_event(raw).expect("should parse message_delta sans cache fields");
+        match parsed {
+            StreamEvent::MessageDelta { usage, .. } => {
+                assert_eq!(usage.output_tokens, 50);
+                assert_eq!(usage.cache_write_tokens, 0);
+                assert_eq!(usage.cache_read_tokens, 0);
+            }
+            other => panic!("expected MessageDelta, got {:?}", other),
+        }
     }
 }

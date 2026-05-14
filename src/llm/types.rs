@@ -238,12 +238,62 @@ impl Message {
     }
 }
 
+/// Anthropic prompt-cache control marker. Applied to system blocks and
+/// tool definitions to mark them as cacheable (`{"type": "ephemeral"}`).
+/// Currently Anthropic-only; other providers ignore this field.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CacheControl {
+    #[serde(rename = "type")]
+    pub control_type: String,
+}
+
+impl CacheControl {
+    /// Ephemeral cache (Anthropic's prompt-caching tier).
+    pub fn ephemeral() -> Self {
+        Self {
+            control_type: "ephemeral".to_string(),
+        }
+    }
+}
+
+/// A single block of system-prompt content with optional cache_control.
+/// Used by `Request::system_blocks` when the caller wants to mark portions
+/// of the system prompt as cacheable. When `Request::system_blocks` is empty,
+/// the simpler `Request::system` string field is used instead.
+#[derive(Debug, Clone)]
+pub struct SystemBlock {
+    pub text: String,
+    pub cache_control: Option<CacheControl>,
+}
+
+impl SystemBlock {
+    /// Create a system block without cache_control.
+    pub fn new(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            cache_control: None,
+        }
+    }
+
+    /// Create a system block marked for ephemeral caching.
+    pub fn cached(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            cache_control: Some(CacheControl::ephemeral()),
+        }
+    }
+}
+
 /// Definition of a tool for the LLM.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolDefinition {
     pub name: String,
     pub description: String,
     pub input_schema: serde_json::Value,
+    /// Optional cache_control marker. When set (typically to ephemeral),
+    /// Anthropic will cache this tool definition. Ignored by other providers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_control: Option<CacheControl>,
 }
 
 /// Token usage statistics from a single API response.
@@ -277,6 +327,11 @@ pub struct Request {
     pub tools: Vec<ToolDefinition>,
     pub max_tokens: Option<u32>,
     pub system: Option<String>,
+    /// Optional structured system prompt with per-block cache_control support.
+    /// When non-empty, takes precedence over `system`. Used to mark portions of
+    /// the system prompt as cacheable (Anthropic prompt-caching). Other
+    /// providers fall back to concatenating the block texts as a plain string.
+    pub system_blocks: Vec<SystemBlock>,
     pub temperature: Option<f64>,
 }
 
@@ -317,6 +372,39 @@ impl Request {
     pub fn system(mut self, system: impl Into<String>) -> Self {
         self.system = Some(system.into());
         self
+    }
+
+    /// Append a system block. When any block is set via this method (or
+    /// [`Self::system_blocks`]), it takes precedence over the plain `system`
+    /// string at serialization time.
+    pub fn system_block(mut self, block: SystemBlock) -> Self {
+        self.system_blocks.push(block);
+        self
+    }
+
+    /// Set the full list of system blocks. See [`Self::system_block`].
+    pub fn system_blocks(mut self, blocks: impl IntoIterator<Item = SystemBlock>) -> Self {
+        self.system_blocks = blocks.into_iter().collect();
+        self
+    }
+
+    /// The effective system prompt as a flat string. Concatenates all
+    /// [`Self::system_blocks`] (joined with blank lines, cache_control
+    /// stripped) when set, otherwise returns [`Self::system`]. Used by
+    /// non-Anthropic providers that don't understand cacheable system
+    /// blocks.
+    pub fn effective_system(&self) -> Option<String> {
+        if !self.system_blocks.is_empty() {
+            Some(
+                self.system_blocks
+                    .iter()
+                    .map(|b| b.text.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n\n"),
+            )
+        } else {
+            self.system.clone()
+        }
     }
 
     /// Set max tokens.

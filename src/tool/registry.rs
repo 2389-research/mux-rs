@@ -75,6 +75,7 @@ impl Registry {
                 name: t.name().to_string(),
                 description: t.description().to_string(),
                 input_schema: t.schema(),
+                cache_control: None,
             })
             .collect()
     }
