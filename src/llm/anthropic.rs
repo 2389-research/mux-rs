@@ -585,3 +585,95 @@ impl super::client::LlmClient for AnthropicClient {
         matches!(kind, MediaKind::Image | MediaKind::Document)
     }
 }
+
+// ---------------------------------------------------------------------------
+// SSE parser tests — regression guards for cache_creation/read extraction
+// from streaming responses. The non-streaming path of `create_message`
+// already pulls these fields; before this branch the streaming path
+// silently zeroed them out (everything `..Default::default()`), which made
+// it look like caching was inactive on streaming agents.
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod sse_parser_tests {
+    use super::*;
+
+    #[test]
+    fn parse_sse_event_extracts_cache_tokens_from_message_start() {
+        // Anthropic carries the cache_creation_input_tokens and
+        // cache_read_input_tokens fields on message_start (with
+        // output_tokens=0). Verify parse_sse_event surfaces them via
+        // StreamEvent::MessageStart.usage.
+        let raw = r#"event: message_start
+data: {"type":"message_start","message":{"id":"msg_01ABC","model":"claude-sonnet-4-5","usage":{"input_tokens":1500,"output_tokens":0,"cache_creation_input_tokens":4747,"cache_read_input_tokens":2200}}}"#;
+
+        let parsed = parse_sse_event(raw).expect("should parse message_start");
+        match parsed {
+            StreamEvent::MessageStart { id, model, usage } => {
+                assert_eq!(id, "msg_01ABC");
+                assert_eq!(model, "claude-sonnet-4-5");
+                assert_eq!(usage.input_tokens, 1500);
+                assert_eq!(usage.output_tokens, 0);
+                assert_eq!(usage.cache_write_tokens, 4747, "cache_creation_input_tokens must map to cache_write_tokens");
+                assert_eq!(usage.cache_read_tokens, 2200, "cache_read_input_tokens must map to cache_read_tokens");
+            }
+            other => panic!("expected MessageStart, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_sse_event_extracts_cache_tokens_from_message_delta() {
+        // The streaming bug was here: previous impl built Usage with
+        // `..Default::default()` instead of pulling cache_read_input_tokens
+        // and cache_creation_input_tokens. This regression-guards the fix.
+        let raw = r#"event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input_tokens":1500,"output_tokens":120,"cache_creation_input_tokens":3000,"cache_read_input_tokens":1100}}"#;
+
+        let parsed = parse_sse_event(raw).expect("should parse message_delta");
+        match parsed {
+            StreamEvent::MessageDelta { usage, .. } => {
+                assert_eq!(usage.output_tokens, 120);
+                assert_eq!(usage.cache_write_tokens, 3000, "MessageDelta must surface cache_creation_input_tokens");
+                assert_eq!(usage.cache_read_tokens, 1100, "MessageDelta must surface cache_read_input_tokens");
+            }
+            other => panic!("expected MessageDelta, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_sse_event_message_start_without_usage_defaults_to_zero() {
+        // Non-Anthropic providers (or older Anthropic format) may omit usage
+        // on message_start. Verify we default to Usage::default() instead of
+        // panicking on the missing field.
+        let raw = r#"event: message_start
+data: {"type":"message_start","message":{"id":"msg_x","model":"claude-x"}}"#;
+
+        let parsed = parse_sse_event(raw).expect("should parse message_start without usage");
+        match parsed {
+            StreamEvent::MessageStart { usage, .. } => {
+                assert_eq!(usage.input_tokens, 0);
+                assert_eq!(usage.cache_write_tokens, 0);
+                assert_eq!(usage.cache_read_tokens, 0);
+            }
+            other => panic!("expected MessageStart, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_sse_event_message_delta_without_cache_fields_defaults_to_zero() {
+        // Backward-compat: pre-caching responses don't include cache fields.
+        // Should parse cleanly with cache_write/cache_read = 0.
+        let raw = r#"event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input_tokens":100,"output_tokens":50}}"#;
+
+        let parsed = parse_sse_event(raw).expect("should parse message_delta sans cache fields");
+        match parsed {
+            StreamEvent::MessageDelta { usage, .. } => {
+                assert_eq!(usage.output_tokens, 50);
+                assert_eq!(usage.cache_write_tokens, 0);
+                assert_eq!(usage.cache_read_tokens, 0);
+            }
+            other => panic!("expected MessageDelta, got {:?}", other),
+        }
+    }
+}
