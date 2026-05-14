@@ -3,7 +3,7 @@
 
 use super::client::StreamEvent;
 use super::media::resolve_request_media;
-use super::{ContentBlock, Message, Request, Response, StopReason, ToolDefinition, Usage};
+use super::{CacheControl, ContentBlock, Message, Request, Response, StopReason, ToolDefinition, Usage};
 use crate::error::LlmError;
 use async_trait::async_trait;
 use futures::Stream;
@@ -13,6 +13,27 @@ use std::pin::Pin;
 const ANTHROPIC_DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 
+/// System prompt field. Either a plain string (legacy) or an array of typed
+/// content blocks with optional cache_control markers (Anthropic prompt
+/// caching). Serializes via the `untagged` enum so the JSON shape on the
+/// wire is exactly what the Anthropic API expects.
+#[derive(Debug, Serialize)]
+#[serde(untagged)]
+pub enum AnthropicSystem {
+    String(String),
+    Blocks(Vec<AnthropicSystemBlock>),
+}
+
+/// One typed system-prompt block. `block_type` is always `"text"` for now.
+#[derive(Debug, Serialize)]
+pub struct AnthropicSystemBlock {
+    #[serde(rename = "type")]
+    pub block_type: String,
+    pub text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_control: Option<CacheControl>,
+}
+
 /// Anthropic API request format.
 #[derive(Debug, Serialize)]
 pub struct AnthropicRequest {
@@ -20,7 +41,7 @@ pub struct AnthropicRequest {
     pub messages: Vec<AnthropicMessage>,
     pub max_tokens: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub system: Option<String>,
+    pub system: Option<AnthropicSystem>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f64>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -76,6 +97,8 @@ pub struct AnthropicTool {
     pub name: String,
     pub description: String,
     pub input_schema: serde_json::Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_control: Option<CacheControl>,
 }
 
 /// Anthropic API response format.
@@ -329,7 +352,29 @@ impl From<&ToolDefinition> for AnthropicTool {
             name: tool.name.clone(),
             description: tool.description.clone(),
             input_schema: tool.input_schema.clone(),
+            cache_control: tool.cache_control.clone(),
         }
+    }
+}
+
+/// Resolve a [`Request`]'s system prompt into the Anthropic wire shape.
+/// When `system_blocks` is non-empty it takes precedence and serializes as an
+/// array of typed blocks (preserving cache_control). Otherwise the plain
+/// `system` string is used. Returns None when both are empty.
+fn build_anthropic_system(req: &Request) -> Option<AnthropicSystem> {
+    if !req.system_blocks.is_empty() {
+        let blocks = req
+            .system_blocks
+            .iter()
+            .map(|b| AnthropicSystemBlock {
+                block_type: "text".to_string(),
+                text: b.text.clone(),
+                cache_control: b.cache_control.clone(),
+            })
+            .collect();
+        Some(AnthropicSystem::Blocks(blocks))
+    } else {
+        req.system.clone().map(AnthropicSystem::String)
     }
 }
 
@@ -343,7 +388,7 @@ pub fn try_into_anthropic_request(req: &Request) -> Result<AnthropicRequest, Llm
         model: req.model.clone(),
         messages,
         max_tokens: req.max_tokens.unwrap_or(4096),
-        system: req.system.clone(),
+        system: build_anthropic_system(req),
         temperature: req.temperature,
         tools: req.tools.iter().map(AnthropicTool::from).collect(),
         stream: None,

@@ -369,9 +369,9 @@ pub fn try_into_gemini_request(req: &Request) -> Result<GeminiRequest, LlmError>
         .map(|msg| try_convert_message_to_content(msg, &tool_name_lookup))
         .collect::<Result<_, _>>()?;
 
-    let system_instruction = req.system.as_ref().map(|s| GeminiContent {
+    let system_instruction = req.effective_system().map(|s| GeminiContent {
         role: None,
-        parts: vec![GeminiPart::text(s)],
+        parts: vec![GeminiPart::text(&s)],
     });
 
     let generation_config = if req.max_tokens.is_some() || req.temperature.is_some() {
@@ -688,6 +688,7 @@ mod tests {
                     "location": {"type": "string"}
                 }
             }),
+            cache_control: None,
         };
 
         let gemini_func = GeminiFunctionDeclaration::from(&tool);

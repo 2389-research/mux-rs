@@ -14,7 +14,10 @@ fn test_request_serialization() {
 
     assert_eq!(anthropic_req.model, "claude-sonnet-4-20250514");
     assert_eq!(anthropic_req.max_tokens, 1024);
-    assert_eq!(anthropic_req.system, Some("You are helpful".to_string()));
+    // Plain `.system(...)` should serialize as a JSON string at the wire level
+    // (backwards-compatible legacy path).
+    let json = serde_json::to_value(&anthropic_req).unwrap();
+    assert_eq!(json["system"], "You are helpful");
     assert_eq!(anthropic_req.messages.len(), 1);
     assert_eq!(anthropic_req.messages[0].role, "user");
 }
@@ -43,6 +46,7 @@ fn test_tool_serialization() {
                 "name": {"type": "string"}
             }
         }),
+        cache_control: None,
     };
 
     let anthropic_tool = AnthropicTool::from(&tool);
@@ -237,4 +241,122 @@ fn test_anthropic_document_url_errors() {
         "expected Configuration error for Document+URL, got {:?}",
         result
     );
+}
+
+// ---------------------------------------------------------------------------
+// Prompt caching: cache_control on system blocks and tool definitions
+// ---------------------------------------------------------------------------
+
+#[test]
+fn system_blocks_serialize_as_array_with_cache_control() {
+    let req = Request::new("claude-sonnet-4-5")
+        .message(Message::user("Hello"))
+        .system_block(SystemBlock::new("static preamble"))
+        .system_block(SystemBlock::cached("cacheable system content"));
+
+    let anth = try_into_anthropic_request(&req).unwrap();
+    let json = serde_json::to_value(&anth).unwrap();
+
+    assert!(
+        json["system"].is_array(),
+        "system_blocks should serialize as a JSON array, got: {}",
+        json["system"]
+    );
+    let arr = json["system"].as_array().unwrap();
+    assert_eq!(arr.len(), 2);
+    assert_eq!(arr[0]["type"], "text");
+    assert_eq!(arr[0]["text"], "static preamble");
+    assert!(
+        arr[0].get("cache_control").is_none(),
+        "first block has no cache_control",
+    );
+    assert_eq!(arr[1]["type"], "text");
+    assert_eq!(arr[1]["text"], "cacheable system content");
+    assert_eq!(arr[1]["cache_control"]["type"], "ephemeral");
+}
+
+#[test]
+fn system_blocks_take_precedence_over_plain_system_string() {
+    // When both `.system(...)` and `.system_block(...)` are set, system_blocks
+    // wins. Documents the precedence so users know which mode they're in.
+    let req = Request::new("claude-sonnet-4-5")
+        .message(Message::user("Hello"))
+        .system("PLAIN")
+        .system_block(SystemBlock::cached("BLOCK"));
+
+    let anth = try_into_anthropic_request(&req).unwrap();
+    let json = serde_json::to_value(&anth).unwrap();
+
+    assert!(json["system"].is_array());
+    assert_eq!(json["system"][0]["text"], "BLOCK");
+    assert!(
+        !json.to_string().contains("PLAIN"),
+        "plain system should be ignored when system_blocks is set"
+    );
+}
+
+#[test]
+fn legacy_system_string_path_unchanged() {
+    // Regression-guard the backwards-compat path: `.system("...")` with no
+    // blocks must still produce a plain JSON string on the wire.
+    let req = Request::new("claude-sonnet-4-5")
+        .message(Message::user("Hi"))
+        .system("legacy prompt");
+
+    let anth = try_into_anthropic_request(&req).unwrap();
+    let json = serde_json::to_value(&anth).unwrap();
+    assert_eq!(json["system"], "legacy prompt");
+}
+
+#[test]
+fn tool_cache_control_serializes() {
+    let tool = ToolDefinition {
+        name: "search".to_string(),
+        description: "Search the web".to_string(),
+        input_schema: serde_json::json!({"type": "object"}),
+        cache_control: Some(CacheControl::ephemeral()),
+    };
+
+    let anth_tool = AnthropicTool::from(&tool);
+    let json = serde_json::to_value(&anth_tool).unwrap();
+
+    assert_eq!(json["name"], "search");
+    assert_eq!(json["cache_control"]["type"], "ephemeral");
+}
+
+#[test]
+fn tool_without_cache_control_omits_field() {
+    let tool = ToolDefinition {
+        name: "search".to_string(),
+        description: "Search the web".to_string(),
+        input_schema: serde_json::json!({"type": "object"}),
+        cache_control: None,
+    };
+
+    let anth_tool = AnthropicTool::from(&tool);
+    let json = serde_json::to_value(&anth_tool).unwrap();
+
+    assert!(
+        json.get("cache_control").is_none(),
+        "cache_control should be omitted when None, got: {}",
+        json
+    );
+}
+
+#[test]
+fn effective_system_concatenates_blocks_for_non_anthropic_providers() {
+    // Non-Anthropic providers call req.effective_system() and should see the
+    // block text joined with blank lines, with cache_control dropped.
+    let req = Request::new("gpt-4")
+        .system_block(SystemBlock::new("first"))
+        .system_block(SystemBlock::cached("second"));
+
+    let effective = req.effective_system().unwrap();
+    assert_eq!(effective, "first\n\nsecond");
+}
+
+#[test]
+fn effective_system_falls_back_to_plain_system_string() {
+    let req = Request::new("gpt-4").system("plain");
+    assert_eq!(req.effective_system().as_deref(), Some("plain"));
 }
