@@ -97,6 +97,7 @@ mod tests {
         acc.handle_event(&StreamEvent::MessageStart {
             id: "msg_1".into(),
             model: "test".into(),
+            usage: crate::llm::Usage::default(),
         });
         acc.handle_event(&StreamEvent::ContentBlockStart {
             index: 0,

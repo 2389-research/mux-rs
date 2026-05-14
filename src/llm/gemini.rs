@@ -568,6 +568,7 @@ impl super::client::LlmClient for GeminiClient {
                             yield StreamEvent::MessageStart {
                                 id: uuid::Uuid::new_v4().to_string(),
                                 model: model.clone(),
+                                usage: crate::llm::Usage::default(),
                             };
                             message_started = true;
                         }

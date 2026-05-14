@@ -172,6 +172,13 @@ pub enum AnthropicStreamEvent {
 pub struct AnthropicMessageStart {
     pub id: String,
     pub model: String,
+    /// Initial usage stats. Anthropic includes input_tokens +
+    /// cache_creation_input_tokens + cache_read_input_tokens here, but
+    /// only output_tokens: 0 in message_start. The final output_tokens
+    /// shows up in message_delta. Optional because not all stream events
+    /// from all providers carry it.
+    #[serde(default)]
+    pub usage: Option<AnthropicUsage>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -434,10 +441,23 @@ fn parse_sse_event(event_str: &str) -> Option<StreamEvent> {
     let anthropic_event: AnthropicStreamEvent = serde_json::from_str(&data).ok()?;
 
     match anthropic_event {
-        AnthropicStreamEvent::MessageStart { message } => Some(StreamEvent::MessageStart {
-            id: message.id,
-            model: message.model,
-        }),
+        AnthropicStreamEvent::MessageStart { message } => {
+            let usage = message
+                .usage
+                .as_ref()
+                .map(|u| Usage {
+                    input_tokens: u.input_tokens,
+                    output_tokens: u.output_tokens,
+                    cache_read_tokens: u.cache_read_input_tokens.unwrap_or(0),
+                    cache_write_tokens: u.cache_creation_input_tokens.unwrap_or(0),
+                })
+                .unwrap_or_default();
+            Some(StreamEvent::MessageStart {
+                id: message.id,
+                model: message.model,
+                usage,
+            })
+        }
         AnthropicStreamEvent::ContentBlockStart {
             index,
             content_block,
@@ -462,7 +482,8 @@ fn parse_sse_event(event_str: &str) -> Option<StreamEvent> {
             usage: Usage {
                 input_tokens: usage.input_tokens,
                 output_tokens: usage.output_tokens,
-                ..Default::default()
+                cache_read_tokens: usage.cache_read_input_tokens.unwrap_or(0),
+                cache_write_tokens: usage.cache_creation_input_tokens.unwrap_or(0),
             },
         }),
         AnthropicStreamEvent::MessageStop => Some(StreamEvent::MessageStop),

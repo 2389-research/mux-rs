@@ -699,6 +699,7 @@ impl super::client::LlmClient for OpenAIClient {
                             yield StreamEvent::MessageStart {
                                 id: chunk.id.clone(),
                                 model: chunk.model.clone(),
+                                usage: crate::llm::Usage::default(),
                             };
                             message_started = true;
                         }

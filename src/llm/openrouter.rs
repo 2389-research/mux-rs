@@ -195,6 +195,7 @@ impl super::client::LlmClient for OpenRouterClient {
                             yield StreamEvent::MessageStart {
                                 id: chunk.id.clone(),
                                 model: chunk.model.clone(),
+                                usage: crate::llm::Usage::default(),
                             };
                             message_started = true;
                         }

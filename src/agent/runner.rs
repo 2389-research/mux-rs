@@ -424,9 +424,16 @@ impl SubAgent {
                 StreamEvent::MessageStart {
                     id: msg_id,
                     model: msg_model,
+                    usage: start_usage,
                 } => {
                     message_id = msg_id.clone();
                     model = msg_model.clone();
+                    // Anthropic carries the cache_creation_input_tokens and
+                    // cache_read_input_tokens in message_start, with
+                    // output_tokens=0. MessageDelta later updates output_tokens
+                    // and re-sends input/cache. We seed usage here so we don't
+                    // lose cache info if a provider only sends it in start.
+                    usage = start_usage.clone();
                 }
                 StreamEvent::ContentBlockDelta { text, .. } if !accumulator.in_tool_use() => {
                     // Fire StreamDelta hook for text tokens
@@ -441,11 +448,25 @@ impl SubAgent {
                     usage: delta_usage,
                 } => {
                     stop_reason = *sr;
-                    usage = delta_usage.clone();
+                    // Merge with usage from MessageStart: take MessageDelta
+                    // values that are non-zero (it has the final output_tokens
+                    // and may or may not re-send cache fields), preserve any
+                    // non-zero values from MessageStart otherwise.
+                    let mut merged = delta_usage.clone();
+                    if merged.input_tokens == 0 {
+                        merged.input_tokens = usage.input_tokens;
+                    }
+                    if merged.cache_read_tokens == 0 {
+                        merged.cache_read_tokens = usage.cache_read_tokens;
+                    }
+                    if merged.cache_write_tokens == 0 {
+                        merged.cache_write_tokens = usage.cache_write_tokens;
+                    }
+                    usage = merged;
                     // Fire StreamUsage hook
                     self.fire_hook(HookEvent::StreamUsage {
                         agent_id: self.agent_id.clone(),
-                        usage: delta_usage.clone(),
+                        usage: usage.clone(),
                     })
                     .await?;
                 }
