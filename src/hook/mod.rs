@@ -102,9 +102,10 @@ pub enum HookEvent {
 }
 
 /// Actions a hook can return to control execution flow.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub enum HookAction {
     /// Continue with normal execution.
+    #[default]
     Continue,
 
     /// Block the action with a message (only valid for Pre* events).
@@ -112,12 +113,6 @@ pub enum HookAction {
 
     /// Transform the input (only valid for PreToolUse).
     Transform(Value),
-}
-
-impl Default for HookAction {
-    fn default() -> Self {
-        Self::Continue
-    }
 }
 
 /// Trait for implementing hooks.
@@ -491,10 +486,10 @@ mod tests {
     #[async_trait]
     impl Hook for BlockingHook {
         async fn on_event(&self, event: &HookEvent) -> Result<HookAction, anyhow::Error> {
-            if let HookEvent::PreToolUse { tool_name, .. } = event {
-                if tool_name == &self.block_tool {
-                    return Ok(HookAction::Block(format!("Tool {} is blocked", tool_name)));
-                }
+            if let HookEvent::PreToolUse { tool_name, .. } = event
+                && tool_name == &self.block_tool
+            {
+                return Ok(HookAction::Block(format!("Tool {} is blocked", tool_name)));
             }
             Ok(HookAction::Continue)
         }

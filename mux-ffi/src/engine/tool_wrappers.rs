@@ -12,9 +12,9 @@ use tokio::sync::Mutex as TokioMutex;
 fn mcp_content_to_string(content: &[McpContentBlock]) -> String {
     content
         .iter()
-        .filter_map(|block| match block {
-            McpContentBlock::Text { text } => Some(text.as_str()),
-            McpContentBlock::Image { .. } => Some("[image]"),
+        .map(|block| match block {
+            McpContentBlock::Text { text } => text.as_str(),
+            McpContentBlock::Image { .. } => "[image]",
         })
         .collect::<Vec<_>>()
         .join("\n")

@@ -561,10 +561,10 @@ impl From<OpenAIResponse> for Response {
         let mut content = Vec::new();
 
         // Add text content if present
-        if let Some(text) = choice.message.content {
-            if !text.is_empty() {
-                content.push(ContentBlock::Text { text });
-            }
+        if let Some(text) = choice.message.content
+            && !text.is_empty()
+        {
+            content.push(ContentBlock::Text { text });
         }
 
         // Add tool calls if present

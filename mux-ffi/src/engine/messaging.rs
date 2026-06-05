@@ -270,9 +270,7 @@ impl MuxEngine {
                         // Store in history
                         {
                             let mut history = self.message_history.write();
-                            let messages = history
-                                .entry(conversation_id.clone())
-                                .or_insert_with(Vec::new);
+                            let messages = history.entry(conversation_id.clone()).or_default();
                             messages.push(StoredMessage {
                                 role: Role::User,
                                 content: user_blocks,
@@ -466,9 +464,7 @@ impl MuxEngine {
         let transcript = subagent.transcript();
         {
             let mut history = self.message_history.write();
-            let messages = history
-                .entry(conversation_id.clone())
-                .or_insert_with(Vec::new);
+            let messages = history.entry(conversation_id.clone()).or_default();
             messages.clear();
             for msg in transcript {
                 messages.push(StoredMessage {
@@ -511,13 +507,13 @@ impl MuxEngine {
 
         // Get provider and validate Custom providers exist before proceeding
         let provider = self.default_provider.read().clone();
-        if let Provider::Custom { ref name } = provider {
-            if !self.callback_providers.read().contains_key(name) {
-                return Err(format!(
-                    "Custom LLM provider '{}' not registered. Call register_llm_provider first.",
-                    name
-                ));
-            }
+        if let Provider::Custom { ref name } = provider
+            && !self.callback_providers.read().contains_key(name)
+        {
+            return Err(format!(
+                "Custom LLM provider '{}' not registered. Call register_llm_provider first.",
+                name
+            ));
         }
 
         // Build AgentRegistry from registered agent configs

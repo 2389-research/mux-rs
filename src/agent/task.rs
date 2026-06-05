@@ -11,6 +11,9 @@ use super::transcript::TranscriptStore;
 use crate::llm::LlmClient;
 use crate::tool::{Registry, Tool, ToolResult};
 
+/// Factory that builds an LLM client for a given model name.
+type LlmClientFactory = Arc<dyn Fn(&str) -> Arc<dyn LlmClient> + Send + Sync>;
+
 /// A tool that spawns subagents to handle delegated tasks.
 ///
 /// When an LLM calls this tool, it spawns a subagent of the specified type,
@@ -24,7 +27,7 @@ pub struct TaskTool {
     tool_registry: Registry,
 
     /// Factory function to create LLM clients for subagents.
-    client_factory: Arc<dyn Fn(&str) -> Arc<dyn LlmClient> + Send + Sync>,
+    client_factory: LlmClientFactory,
 
     /// Optional transcript store for agent resume.
     transcript_store: Option<Arc<dyn TranscriptStore>>,

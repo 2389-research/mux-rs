@@ -62,7 +62,7 @@ impl MuxEngine {
             .read()
             .get(&model)
             .cloned()
-            .unwrap_or_else(|| ModelContextConfig {
+            .unwrap_or(ModelContextConfig {
                 model,
                 context_limit: 0, // 0 means no limit
                 compaction_mode: CompactionMode::Summarize,
@@ -267,11 +267,11 @@ impl MuxEngine {
         // Get model config for threshold
         let threshold = self.get_warning_threshold_for_conversation(conversation_id);
 
-        if let Some(percent) = usage.usage_percent {
-            if percent >= threshold * 100.0 {
-                callback.on_context_warning(usage);
-                return true;
-            }
+        if let Some(percent) = usage.usage_percent
+            && percent >= threshold * 100.0
+        {
+            callback.on_context_warning(usage);
+            return true;
         }
 
         false
@@ -378,7 +378,7 @@ impl MuxEngine {
         let llm_messages: Vec<Message> = messages
             .iter()
             .map(|m| Message {
-                role: m.role.clone(),
+                role: m.role,
                 content: m.content.clone(),
             })
             .collect();

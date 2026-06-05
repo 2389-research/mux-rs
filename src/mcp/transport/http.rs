@@ -77,10 +77,10 @@ impl Transport for HttpTransport {
             .map_err(|e| McpError::Connection(format!("HTTP request failed: {}", e)))?;
 
         // Check for session ID in response (server may establish one)
-        if let Some(session_id) = response.headers().get("Mcp-Session-Id") {
-            if let Ok(id) = session_id.to_str() {
-                *self.session_id.lock().await = Some(id.to_string());
-            }
+        if let Some(session_id) = response.headers().get("Mcp-Session-Id")
+            && let Ok(id) = session_id.to_str()
+        {
+            *self.session_id.lock().await = Some(id.to_string());
         }
 
         let status = response.status();

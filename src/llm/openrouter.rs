@@ -54,16 +54,16 @@ impl OpenRouterClient {
     ) -> Self {
         let mut headers = HeaderMap::new();
 
-        if let Some(referer) = referer {
-            if let Ok(value) = HeaderValue::from_str(referer) {
-                headers.insert("HTTP-Referer", value);
-            }
+        if let Some(referer) = referer
+            && let Ok(value) = HeaderValue::from_str(referer)
+        {
+            headers.insert("HTTP-Referer", value);
         }
 
-        if let Some(title) = title {
-            if let Ok(value) = HeaderValue::from_str(title) {
-                headers.insert("X-Title", value);
-            }
+        if let Some(title) = title
+            && let Ok(value) = HeaderValue::from_str(title)
+        {
+            headers.insert("X-Title", value);
         }
 
         let http = reqwest::Client::builder()

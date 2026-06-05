@@ -7,7 +7,7 @@ use mux::prelude::{ContentBlock, Role};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
-use std::path::PathBuf;
+use std::path::Path;
 
 /// File names for persistence
 pub(super) const WORKSPACES_FILE: &str = "workspaces.json";
@@ -42,7 +42,7 @@ impl From<LegacyStoredMessage> for StoredMessage {
 /// Persistence helper methods
 impl MuxEngine {
     /// Load workspaces from disk. Returns empty HashMap if file doesn't exist or is invalid.
-    pub(super) fn load_workspaces(data_dir: &PathBuf) -> HashMap<String, crate::types::Workspace> {
+    pub(super) fn load_workspaces(data_dir: &Path) -> HashMap<String, crate::types::Workspace> {
         let path = data_dir.join(WORKSPACES_FILE);
         match fs::read_to_string(&path) {
             Ok(contents) => serde_json::from_str(&contents).unwrap_or_else(|e| {
@@ -54,7 +54,7 @@ impl MuxEngine {
     }
 
     /// Load conversations from disk. Returns empty HashMap if file doesn't exist or is invalid.
-    pub(super) fn load_conversations(data_dir: &PathBuf) -> HashMap<String, Vec<Conversation>> {
+    pub(super) fn load_conversations(data_dir: &Path) -> HashMap<String, Vec<Conversation>> {
         let path = data_dir.join(CONVERSATIONS_FILE);
         match fs::read_to_string(&path) {
             Ok(contents) => serde_json::from_str(&contents).unwrap_or_else(|e| {
@@ -68,7 +68,7 @@ impl MuxEngine {
     /// Load all message histories from disk based on known conversations.
     /// Handles migration from legacy format (String content) to new format (Vec<ContentBlock>).
     pub(super) fn load_all_messages(
-        data_dir: &PathBuf,
+        data_dir: &Path,
         conversations: &HashMap<String, Vec<Conversation>>,
     ) -> HashMap<String, Vec<StoredMessage>> {
         let messages_dir = data_dir.join(MESSAGES_DIR);
@@ -128,13 +128,13 @@ impl MuxEngine {
         let messages_dir = self.data_dir.join(MESSAGES_DIR);
         let path = messages_dir.join(format!("{}.json", conversation_id));
         let history = self.message_history.read();
-        if let Some(messages) = history.get(conversation_id) {
-            if let Err(e) = fs::write(
+        if let Some(messages) = history.get(conversation_id)
+            && let Err(e) = fs::write(
                 &path,
                 serde_json::to_string_pretty(messages).unwrap_or_default(),
-            ) {
-                eprintln!("Failed to save messages to {}: {}", path.display(), e);
-            }
+            )
+        {
+            eprintln!("Failed to save messages to {}: {}", path.display(), e);
         }
     }
 
