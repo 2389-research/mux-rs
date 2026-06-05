@@ -448,7 +448,13 @@ mod tests {
                     self.0.on_agent_error(a, b);
                 }
                 fn on_stream_delta(&self, _subagent_id: String, _text: String) {}
-                fn on_stream_usage(&self, _subagent_id: String, _input_tokens: u32, _output_tokens: u32) {}
+                fn on_stream_usage(
+                    &self,
+                    _subagent_id: String,
+                    _input_tokens: u32,
+                    _output_tokens: u32,
+                ) {
+                }
             }
             ForwardToArc(handler.clone())
         }));
@@ -478,7 +484,13 @@ mod tests {
             fn on_agent_completed(&self, _: String, _: String, _: u32, _: u32, _: bool) {}
             fn on_agent_error(&self, _: String, _: String) {}
             fn on_stream_delta(&self, _subagent_id: String, _text: String) {}
-            fn on_stream_usage(&self, _subagent_id: String, _input_tokens: u32, _output_tokens: u32) {}
+            fn on_stream_usage(
+                &self,
+                _subagent_id: String,
+                _input_tokens: u32,
+                _output_tokens: u32,
+            ) {
+            }
         }
         *engine_handler.write() = Some(Box::new(ForwardToArc(handler.clone())));
 
@@ -507,7 +519,13 @@ mod tests {
             fn on_agent_completed(&self, _: String, _: String, _: u32, _: u32, _: bool) {}
             fn on_agent_error(&self, _: String, _: String) {}
             fn on_stream_delta(&self, _subagent_id: String, _text: String) {}
-            fn on_stream_usage(&self, _subagent_id: String, _input_tokens: u32, _output_tokens: u32) {}
+            fn on_stream_usage(
+                &self,
+                _subagent_id: String,
+                _input_tokens: u32,
+                _output_tokens: u32,
+            ) {
+            }
         }
         *engine_handler.write() = Some(Box::new(ForwardToArc(handler.clone())));
 
@@ -536,7 +554,13 @@ mod tests {
             fn on_agent_completed(&self, _: String, _: String, _: u32, _: u32, _: bool) {}
             fn on_agent_error(&self, _: String, _: String) {}
             fn on_stream_delta(&self, _subagent_id: String, _text: String) {}
-            fn on_stream_usage(&self, _subagent_id: String, _input_tokens: u32, _output_tokens: u32) {}
+            fn on_stream_usage(
+                &self,
+                _subagent_id: String,
+                _input_tokens: u32,
+                _output_tokens: u32,
+            ) {
+            }
         }
         *engine_handler.write() = Some(Box::new(ForwardToArc(handler.clone())));
 
@@ -565,7 +589,13 @@ mod tests {
             }
             fn on_agent_error(&self, _: String, _: String) {}
             fn on_stream_delta(&self, _subagent_id: String, _text: String) {}
-            fn on_stream_usage(&self, _subagent_id: String, _input_tokens: u32, _output_tokens: u32) {}
+            fn on_stream_usage(
+                &self,
+                _subagent_id: String,
+                _input_tokens: u32,
+                _output_tokens: u32,
+            ) {
+            }
         }
         *engine_handler.write() = Some(Box::new(ForwardToArc(handler.clone())));
 

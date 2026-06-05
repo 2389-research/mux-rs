@@ -452,13 +452,7 @@ mod tests {
 
         fn on_stream_delta(&self, _subagent_id: String, _text: String) {}
 
-        fn on_stream_usage(
-            &self,
-            _subagent_id: String,
-            _input_tokens: u32,
-            _output_tokens: u32,
-        ) {
-        }
+        fn on_stream_usage(&self, _subagent_id: String, _input_tokens: u32, _output_tokens: u32) {}
     }
 
     #[tokio::test]
