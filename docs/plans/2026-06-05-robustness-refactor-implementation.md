@@ -260,10 +260,21 @@ git add -A
 git commit -m "style: cargo fmt --all"
 ```
 
-### Task 5: Fix all clippy warnings
+### Task 5: Fix all mechanical/style clippy warnings
+
+**Scope note (full census, captured 2026-06-05):** `cargo clippy --workspace --all-targets`
+reports **55** warnings. This task owns the **mechanical/style** subset only. The
+**dead-code/unused family** (`dead_code`, `unused_variables`, `unused_mut` where it is the
+unused-`before` test var, `await_holding_lock`) is handled by **Task 6** (dead-code
+disposition) and **Task 7** (hollow test). After Task 5, clippy must show *only* the
+items Tasks 6/7 own — every style lint below must be gone:
+`collapsible_if` ×4, `while_let_loop` ×2, `type_complexity` ×2, `unwrap_or_default`,
+`unnecessary_lazy_evaluations`, `unnecessary_filter_map`, `ptr_arg`, `module_inception`,
+`manual_flatten`, `manual_div_ceil`, `derivable_impls`, `collapsible_match`,
+`clone_on_copy`, and the `unused_mut` in `src/llm/media.rs`.
 
 **Files:**
-- Modify: `mux-ffi/src/context.rs:118`, `mux-ffi/src/engine/workspace.rs:120`, `mux-ffi/src/engine/tool_wrappers.rs:15`, `mux-ffi/src/task_tool.rs:115`, plus any auto-fixable sites.
+- Modify: `mux-ffi/src/context.rs:118`, `mux-ffi/src/engine/workspace.rs:120`, `mux-ffi/src/engine/tool_wrappers.rs:15`, `mux-ffi/src/task_tool.rs:115`, `src/agent/task.rs:27`, `src/coordinator/mod.rs:4`, plus any auto-fixable sites.
 
 - [ ] **Step 1: Apply the auto-fixable subset**
 
@@ -322,10 +333,40 @@ signature in this file (e.g. the constructor) and replace those with `LlmClientF
 rg -n 'Arc<dyn Fn\(&str\) -> Arc<dyn LlmClient> \+ Send \+ Sync>' mux-ffi/src/task_tool.rs
 ```
 
-- [ ] **Step 6: Verify clippy is clean**
+- [ ] **Step 5b: Manual fix — `type_complexity` in `src/agent/task.rs` (core crate)**
 
-Run: `cargo clippy --workspace --all-targets -- -D warnings`
-Expected: exits 0, no warnings.
+Same pattern, but this is the **frozen `mux` crate** — the alias MUST be private (no `pub`),
+since it is an internal field type, not public API. Add near the top of `src/agent/task.rs`
+(after imports):
+```rust
+/// Factory that builds an LLM client for a given model name.
+type LlmClientFactory = Arc<dyn Fn(&str) -> Arc<dyn LlmClient> + Send + Sync>;
+```
+Then replace the field type (line ~27) `Arc<dyn Fn(&str) -> Arc<dyn LlmClient> + Send + Sync>`
+with `LlmClientFactory`, and the same type in the constructor/any signature in this file:
+```bash
+rg -n 'Arc<dyn Fn\(&str\) -> Arc<dyn LlmClient> \+ Send \+ Sync>' src/agent/task.rs
+```
+
+- [ ] **Step 5c: Manual fix — `module_inception` in `src/coordinator/mod.rs`**
+
+Renaming the module would change a path → forbidden by the freeze. Suppress with a documented
+`#[allow]`. Read `src/coordinator/mod.rs:4` first; on the `mod coordinator` line add:
+```rust
+// `coordinator` submodule mirrors the module name by design; renaming would
+// change the public path, which the API freeze forbids.
+#[allow(clippy::module_inception)]
+mod coordinator;
+```
+
+- [ ] **Step 6: Verify only the Task 6/7 warnings remain**
+
+Run: `cargo clippy --workspace --all-targets 2>&1 | rg '^warning: ' | sort | uniq -c`
+Expected: **every style lint from the census note is gone.** The only remaining warnings are
+the dead-code/unused family owned by Task 6 (`dead_code`, `field … never read`,
+`… never used`, `await_holding_lock`) and the single `unused_variables: before` owned by
+Task 7. `cargo clippy … -- -D warnings` will still fail at this point — that is expected and
+becomes clean after Tasks 6 + 7.
 
 - [ ] **Step 7: Verify behavior unchanged**
 
@@ -336,37 +377,90 @@ Expected: tests green, `bindings OK`.
 
 ```bash
 git add -A
-git commit -m "fix(clippy): resolve all workspace lint warnings"
+git commit -m "fix(clippy): resolve mechanical/style lint warnings"
 ```
 
-### Task 6: Remove dead code
+### Task 6: Dead-code disposition
+
+**Decision (2026-06-05, Doctor Biz approved "Option A"):** the dead-code/unused warnings are
+NOT all simple dead code. They split two ways, and each half is handled differently:
+
+1. **Truly orphaned — zero references anywhere, incl. tests → DELETE** (after a rename-safety
+   sweep): `execute_tool_with_captured_client` and the `server_name` field + getter.
+2. **Tested but not yet wired into production → KEEP + `#[allow(dead_code)]` + comment + tracked
+   issue** (deleting would discard tested, probably-intended code; wiring it up would change
+   behavior and is forbidden by the freeze). Two clusters:
+   - **FFI task/subagent-tool cluster** → tracked in **issue #9**.
+   - **Core `RunHandle` status setters** → tracked in **issue #10**.
+
+The lone `await_holding_lock` warning is *inside* `execute_task_tool`, so it is suppressed with
+that method (it is in not-yet-wired code; the lock-across-await risk is latent until the feature
+is wired — noted in #9).
 
 **Files:**
-- Modify: `mux-ffi/src/engine/mcp.rs` (remove `execute_tool_with_captured_client`, ~line 691)
+- Modify (delete items): `mux-ffi/src/engine/mcp.rs` (remove `execute_tool_with_captured_client`, ~line 691); `mux-ffi/src/engine/tool_wrappers.rs` (remove the `server_name` field ~line 29 and `server_name()` getter ~line 61 — **keep** the `new()` param, it builds `qualified_name`).
+- Modify (annotate, keep): `mux-ffi/src/engine/messaging.rs` (`execute_task_tool` ~501), `mux-ffi/src/engine/mcp.rs` (`get_workspace_tools` ~601, `parse_tool_name` ~685), `mux-ffi/src/engine/helpers.rs` (`parse_qualified_tool_name` ~6), `mux-ffi/src/engine/subagent.rs` (`TaskToolEventProxy` ~18), `mux-ffi/src/engine/mod.rs` (`transcript_store` field ~73), `src/agent/async_handle.rs` (`set_running`/`set_completed`/`set_failed` ~191/197/208).
 
-- [ ] **Step 1: Rename-safety sweep (prove it is unused)**
+- [ ] **Step 1: Rename-safety sweep for the two DELETE targets**
 
-Run:
 ```bash
-rg -n 'execute_tool_with_captured_client'
+rg -n 'execute_tool_with_captured_client'   # expect: 1 hit (the def)
+rg -n '\bserver_name\b' mux-ffi/src/engine/tool_wrappers.rs   # expect: param use (line ~49), field decl/init (~29/52), getter (~61) — NO external readers
+rg -n '\.server_name\(\)' --type rust       # expect: 0 hits (getter uncalled)
 ```
-Expected: exactly one hit — the definition. (If more appear, STOP; it is not dead.)
+If any unexpected hit appears, STOP — it is not dead.
 
-- [ ] **Step 2: Remove the function**
+- [ ] **Step 2: Delete `execute_tool_with_captured_client`**
 
-Delete the entire `pub(super) async fn execute_tool_with_captured_client(...) { ... }` item.
-Read the file around it first to capture the exact span.
+Read the file around `mux-ffi/src/engine/mcp.rs:691` first; delete the entire
+`pub(super) async fn execute_tool_with_captured_client(...) { ... }` item.
 
-- [ ] **Step 3: Verify**
+- [ ] **Step 3: Delete the `server_name` field + getter (keep the ctor param)**
 
-Run: `cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace 2>&1 | rg 'test result'`
-Expected: clean; tests green. Binding diff `OK` (it was `pub(super)`, never in the FFI surface).
+In `mux-ffi/src/engine/tool_wrappers.rs`: remove the `server_name: String` struct field (~29),
+remove its assignment in `new()` (the `server_name,` field-init line ~52), and remove the
+`pub fn server_name(&self) -> &str { &self.server_name }` getter (~61). **Keep** the `new()`
+parameter `server_name: String` and the `format!("{}:{}", server_name, tool_name)` at ~49 — the
+qualified name still depends on it. `McpToolWrapper` is not `#[uniffi::export]`, so this is not
+an FFI-surface change (binding diff proves it).
 
-- [ ] **Step 4: Commit**
+- [ ] **Step 4: Annotate the FFI task/subagent-tool cluster (keep, tracked in #9)**
+
+On each item below, add `#[allow(dead_code)]` plus a one-line comment. Use this exact comment
+text (evergreen; states the fact, not the history):
+```rust
+// Reachable only via tests today: the task/subagent tool is implemented and tested but not
+// yet wired into the production chat loop (build_tool_registry / do_send_message). See #9.
+#[allow(dead_code)]
+```
+Items: `execute_task_tool` (`messaging.rs` ~501) — ALSO add `#[allow(clippy::await_holding_lock)]`
+on the same item; `get_workspace_tools` (`mcp.rs` ~601); `parse_tool_name` (`mcp.rs` ~685);
+`parse_qualified_tool_name` (`helpers.rs` ~6); `TaskToolEventProxy` (`subagent.rs` ~18);
+`transcript_store` field (`mod.rs` ~73).
+
+- [ ] **Step 5: Annotate the core `RunHandle` setters (keep, tracked in #10)**
+
+In `src/agent/async_handle.rs`, on `set_running` (~191), `set_completed` (~197), and
+`set_failed` (~208), add `#[allow(dead_code)]` and this comment on the first of the three:
+```rust
+// Status-transition helpers exercised by tests but not yet called by the production run
+// lifecycle. Kept until the lifecycle wiring is decided. See #10.
+```
+This alias/field stays private — no public-API change.
+
+- [ ] **Step 6: Verify clippy is clean and behavior unchanged**
+
+```bash
+cargo clippy --workspace --all-targets -- -D warnings   # expect: only the `unused_variables: before` (Task 7) may remain
+cargo test --workspace 2>&1 | rg 'test result'          # counts >= floor
+```
+Then the binding diff (Task 4 Step 3) — expect `bindings OK` (all changes are internal/`pub(super)`/private).
+
+- [ ] **Step 7: Commit**
 
 ```bash
 git add -A
-git commit -m "refactor: remove dead execute_tool_with_captured_client"
+git commit -m "refactor: remove orphaned dead code; retain+document unwired tested code (#9, #10)"
 ```
 
 ### Task 7: Strengthen the hollow truncation test
