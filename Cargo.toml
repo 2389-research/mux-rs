@@ -2,12 +2,21 @@
 members = [".", "mux-ffi", "agent-test-tui", "code-agent"]
 resolver = "2"
 
+[workspace.lints.rust]
+unused = "warn"
+
+[workspace.lints.clippy]
+all = "warn"
+
 [package]
 name = "mux"
 version = "0.13.0"
 edition = "2024"
 description = "Agentic infrastructure for Rust"
 license = "MIT"
+
+[lints]
+workspace = true
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }

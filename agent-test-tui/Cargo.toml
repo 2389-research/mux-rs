@@ -13,3 +13,6 @@ serde_json = "1"
 anyhow = "1"
 dirs = "5"
 dotenvy = "0.15"
+
+[lints]
+workspace = true
