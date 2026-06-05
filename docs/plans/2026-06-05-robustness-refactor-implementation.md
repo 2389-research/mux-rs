@@ -393,13 +393,20 @@ NOT all simple dead code. They split two ways, and each half is handled differen
    - **FFI task/subagent-tool cluster** → tracked in **issue #9**.
    - **Core `RunHandle` status setters** → tracked in **issue #10**.
 
-The lone `await_holding_lock` warning is *inside* `execute_task_tool`, so it is suppressed with
-that method (it is in not-yet-wired code; the lock-across-await risk is latent until the feature
-is wired — noted in #9).
+`await_holding_lock` fires at **4 sites**, in two groups:
+- **2 inside `execute_task_tool`** (`messaging.rs:523`, `:557`) — dead/not-yet-wired code; they
+  ride with that method's annotations (covered by `#[allow(clippy::await_holding_lock)]` in
+  Step 4, noted in #9).
+- **2 in LIVE, FFI-reachable code** (`do_spawn_agent` at `subagent.rs:214`, `do_resume_agent` at
+  `subagent.rs:331`; both called from the `#[uniffi::export]` `spawn_agent`/`resume_agent`). The
+  fix (snapshot the tools before the `.await` so the guard drops first) would change
+  lock-contention timing — a concurrency-semantics change the freeze forbids — so these are KEPT
+  as-is + `#[allow(clippy::await_holding_lock)]` + comment, tracked in **issue #11** (Step 4b).
 
 **Files:**
 - Modify (delete items): `mux-ffi/src/engine/mcp.rs` (remove `execute_tool_with_captured_client`, ~line 691); `mux-ffi/src/engine/tool_wrappers.rs` (remove the `server_name` field ~line 29 and `server_name()` getter ~line 61 — **keep** the `new()` param, it builds `qualified_name`).
 - Modify (annotate, keep): `mux-ffi/src/engine/messaging.rs` (`execute_task_tool` ~501), `mux-ffi/src/engine/mcp.rs` (`get_workspace_tools` ~601, `parse_tool_name` ~685), `mux-ffi/src/engine/helpers.rs` (`parse_qualified_tool_name` ~6), `mux-ffi/src/engine/subagent.rs` (`TaskToolEventProxy` ~18), `mux-ffi/src/engine/mod.rs` (`transcript_store` field ~73), `src/agent/async_handle.rs` (`set_running`/`set_completed`/`set_failed` ~191/197/208).
+- Modify (annotate live `await_holding_lock`, keep): `mux-ffi/src/engine/subagent.rs` — `do_spawn_agent` (~157, await at ~214) and `do_resume_agent` (~281, await at ~331). Add `#[allow(clippy::await_holding_lock)]` + comment → #11. These are **live** (FFI-reachable), NOT dead — do **not** add `#[allow(dead_code)]`.
 
 - [ ] **Step 1: Rename-safety sweep for the two DELETE targets**
 
@@ -438,6 +445,20 @@ on the same item; `get_workspace_tools` (`mcp.rs` ~601); `parse_tool_name` (`mcp
 `parse_qualified_tool_name` (`helpers.rs` ~6); `TaskToolEventProxy` (`subagent.rs` ~18);
 `transcript_store` field (`mod.rs` ~73).
 
+- [ ] **Step 4b: Annotate the 2 LIVE `await_holding_lock` sites (keep, tracked in #11)**
+
+These are production code reachable from the FFI surface, so they are NOT dead code — add ONLY
+`#[allow(clippy::await_holding_lock)]` (no `#[allow(dead_code)]`). Put the attribute on the
+method, with this comment:
+```rust
+// Holds a custom_tools read guard across `.await` while registering tools into a local
+// registry. The awaited work touches a different lock, so this path cannot self-deadlock;
+// the snapshot-before-await fix changes lock-contention timing (a behavior change) and is
+// deferred under the no-behavior-change freeze. See #11.
+#[allow(clippy::await_holding_lock)]
+```
+Items: `do_spawn_agent` (`subagent.rs` ~157) and `do_resume_agent` (`subagent.rs` ~281).
+
 - [ ] **Step 5: Annotate the core `RunHandle` setters (keep, tracked in #10)**
 
 In `src/agent/async_handle.rs`, on `set_running` (~191), `set_completed` (~197), and
@@ -460,7 +481,7 @@ Then the binding diff (Task 4 Step 3) — expect `bindings OK` (all changes are 
 
 ```bash
 git add -A
-git commit -m "refactor: remove orphaned dead code; retain+document unwired tested code (#9, #10)"
+git commit -m "refactor: remove orphaned dead code; retain+document unwired tested code (#9, #10, #11)"
 ```
 
 ### Task 7: Strengthen the hollow truncation test
