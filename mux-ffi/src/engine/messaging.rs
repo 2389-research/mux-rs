@@ -494,6 +494,11 @@ impl MuxEngine {
 
     /// Execute the TaskTool to spawn a subagent.
     /// This creates an FfiTaskTool with the current engine state and event handler.
+    // Unwired: the task/subagent tool is implemented and tested but not yet dispatched from the
+    // production chat loop. Retained until wired. See #9.
+    // (lock-across-await at the registry loops rides with this unwired method; see #9)
+    #[allow(dead_code)]
+    #[allow(clippy::await_holding_lock)]
     pub(super) async fn execute_task_tool(
         &self,
         params: serde_json::Value,

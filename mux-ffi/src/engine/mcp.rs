@@ -15,8 +15,8 @@ use mux::mcp::{
     McpResourceTemplate as MuxMcpResourceTemplate,
 };
 use mux::prelude::{
-    McpClient, McpContentBlock, McpServerConfig as MuxMcpServerConfig, McpToolInfo, McpTransport,
-    Tool, ToolDefinition,
+    McpClient, McpServerConfig as MuxMcpServerConfig, McpToolInfo, McpTransport, Tool,
+    ToolDefinition,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -598,6 +598,9 @@ impl MuxEngine {
 
     /// Get all tools available for a workspace as ToolDefinitions for the LLM.
     /// Includes built-in mux tools, custom tools, and any connected MCP server tools.
+    // Unwired: the task/subagent tool is implemented and tested but not yet dispatched from the
+    // production chat loop. Retained until wired. See #9.
+    #[allow(dead_code)]
     pub(super) fn get_workspace_tools(&self, workspace_id: &str) -> Vec<ToolDefinition> {
         let mut tools = Vec::new();
 
@@ -682,46 +685,11 @@ impl MuxEngine {
     }
 
     /// Find the MCP client and tool name for a qualified tool name (server:tool).
+    // Unwired: the task/subagent tool is implemented and tested but not yet dispatched from the
+    // production chat loop. Retained until wired. See #9.
+    #[allow(dead_code)]
     pub(super) fn parse_tool_name(&self, qualified_name: &str) -> Option<(String, String)> {
         helpers::parse_qualified_tool_name(qualified_name)
-    }
-
-    /// Execute a tool call using pre-captured MCP client references.
-    /// This is immune to race conditions from workspace disconnection during message processing.
-    pub(super) async fn execute_tool_with_captured_client(
-        captured_clients: &HashMap<String, Arc<TokioMutex<McpClient>>>,
-        server_name: &str,
-        tool_name: &str,
-        arguments: serde_json::Value,
-    ) -> Result<String, String> {
-        let client_arc = captured_clients
-            .get(server_name)
-            .ok_or_else(|| format!("Server '{}' not available", server_name))?;
-
-        let client = client_arc.lock().await;
-        let result = client
-            .call_tool(tool_name, arguments)
-            .await
-            .map_err(|e| e.to_string())?;
-
-        // Convert McpToolResult to string
-        let content_text: String = result
-            .content
-            .iter()
-            .map(|block| match block {
-                McpContentBlock::Text { text } => text.clone(),
-                McpContentBlock::Image { data, mime_type } => {
-                    format!("[Image: {} bytes, type: {}]", data.len(), mime_type)
-                }
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-
-        if result.is_error {
-            Err(content_text)
-        } else {
-            Ok(content_text)
-        }
     }
 }
 

@@ -25,8 +25,6 @@ fn mcp_content_to_string(content: &[McpContentBlock]) -> String {
 pub struct McpToolWrapper {
     /// Full name as "server:tool" for the LLM
     qualified_name: String,
-    /// Server name for display
-    server_name: String,
     /// Tool name within the MCP server
     tool_name: String,
     /// Description from MCP server
@@ -49,17 +47,11 @@ impl McpToolWrapper {
         let qualified_name = format!("{}:{}", server_name, tool_name);
         Self {
             qualified_name,
-            server_name,
             tool_name,
             tool_description,
             tool_schema,
             client,
         }
-    }
-
-    /// Get the server name.
-    pub fn server_name(&self) -> &str {
-        &self.server_name
     }
 }
 

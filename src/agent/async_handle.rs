@@ -188,12 +188,16 @@ impl RunHandle {
     // Internal methods for managing state
 
     /// Set status to Running.
+    // Status-transition helpers exercised by tests but not yet called by the production run
+    // lifecycle. Retained until the lifecycle wiring is decided. See #10.
+    #[allow(dead_code)]
     pub(crate) fn set_running(&self) {
         self.status
             .store(RunStatus::Running as u8, Ordering::SeqCst);
     }
 
     /// Mark as completed successfully.
+    #[allow(dead_code)]
     pub(crate) fn set_completed(&self) {
         {
             let mut end_guard = self.end_time.lock().unwrap();
@@ -205,6 +209,7 @@ impl RunHandle {
     }
 
     /// Mark as failed with an error.
+    #[allow(dead_code)]
     pub(crate) fn set_failed(&self, error: MuxError) {
         {
             let mut end_guard = self.end_time.lock().unwrap();
