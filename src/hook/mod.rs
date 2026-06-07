@@ -60,7 +60,7 @@ pub enum HookEvent {
         session_id: String,
         final_text: String,
         /// Set to true to request the agent loop continue.
-        /// Uses Arc<AtomicBool> for interior mutability across async hooks.
+        /// Uses `Arc<AtomicBool>` for interior mutability across async hooks.
         continue_loop: Arc<AtomicBool>,
     },
 
