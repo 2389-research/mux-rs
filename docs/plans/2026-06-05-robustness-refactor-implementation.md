@@ -490,35 +490,81 @@ git commit -m "refactor: remove orphaned dead code; retain+document unwired test
 - Modify: `mux-ffi/src/lib.rs` (the test at ~line 442-461, `test_auto_compaction_small_context_uses_truncation`)
 
 The test computes `let before = engine.get_message_count(&conv.id);` then never uses it (the
-source of the `unused_variable` warning). Make it actually assert truncation happened.
+source of the `unused_variable` warning).
+
+**Why the obvious fix is hollow:** the test injects five ~40-byte messages (~10 tokens each,
+~50 total) under a `context_limit` of 4096. `compact_context` computes
+`target = effective_limit(4096) = 4096 * SAFETY_MARGIN(0.8) = 3276` tokens, and
+`truncate_oldest` keeps every message that fits, scanning from newest backward. 50 tokens is
+far under 3276, so `keep_from` stays at 0, nothing is drained, and `after == before == 5`.
+`assert!(after <= before)` is therefore `5 <= 5` — trivially true. It clears the warning but
+leaves the test as hollow as before. To genuinely test truncation, the conversation must
+overflow the budget so the oldest messages are actually dropped.
 
 - [ ] **Step 1: Read the test and confirm the shape**
 
 Run: `sed -n '440,461p' mux-ffi/src/lib.rs`
 
-- [ ] **Step 2: Add the missing assertion**
+- [ ] **Step 2: Size the messages to overflow the budget**
+
+Replace the message-injection loop so the five messages together exceed the effective limit.
+Each message of ~4096 bytes is ~1024 tokens (`4096 / APPROX_BYTES_PER_TOKEN(4)`); five of them
+(~5120 tokens) exceed the ~3276-token effective limit, while each single message (1024 tokens)
+stays well under it so the newest message always survives. Replace:
+```rust
+        // Add messages
+        for i in 0..5 {
+            engine.inject_test_message(
+                &conv.id,
+                Role::User,
+                &format!("Message {} with content to consume tokens", i),
+            );
+        }
+```
+with:
+```rust
+        // Each message is ~1024 tokens (4096 bytes / APPROX_BYTES_PER_TOKEN=4); the five
+        // together (~5120 tokens) exceed the effective limit
+        // (4096 * SAFETY_MARGIN=0.8 ≈ 3276 tokens), so truncation must drop the oldest
+        // messages while keeping the most recent.
+        for i in 0..5 {
+            engine.inject_test_message(
+                &conv.id,
+                Role::User,
+                &format!("Message {} {}", i, "x".repeat(4096)),
+            );
+        }
+```
+
+- [ ] **Step 3: Assert truncation actually happened**
 
 After the existing `let result = engine.compact_context(conv.id.clone());` / `assert!(result.is_ok(), ...)`
 lines, add:
 ```rust
         let after = engine.get_message_count(&conv.id);
         assert!(
-            after <= before,
-            "truncation must not grow the conversation (before={before}, after={after})"
+            after < before,
+            "truncation must drop the oldest over-budget messages (before={before}, after={after})"
+        );
+        assert!(
+            after >= 1,
+            "truncation must retain the most recent message (after={after})"
         );
 ```
-(`before` is now used, clearing the warning, and the test verifies the intended invariant.)
+(`before` is now used, clearing the warning; `is_ok()` still proves the truncation strategy was
+selected — summarization would need an API key — and the new asserts prove truncation actually
+trimmed the history.)
 
-- [ ] **Step 3: Verify**
+- [ ] **Step 4: Verify**
 
 Run: `cargo test -p mux-ffi test_auto_compaction_small_context_uses_truncation -- --nocapture`
 Expected: PASS, no `unused_variable` warning.
 
-- [ ] **Step 4: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
 git add mux-ffi/src/lib.rs
-git commit -m "test: assert truncation invariant in small-context compaction"
+git commit -m "test: exercise real truncation in small-context compaction"
 ```
 
 ### Task 8: Give CI teeth
@@ -575,67 +621,65 @@ git commit -m "ci: enforce cargo fmt --check and clippy -D warnings"
 
 ## Phase 2 — Test extraction (structural, near-zero risk)
 
-For each big file: move its trailing `#[cfg(test)] mod tests { ... }` block **verbatim** into
-a sibling `*_test.rs`, and declare it from the parent with `#[cfg(test)] mod <name>_test;`
-(matching the existing convention in `src/llm/mod.rs`, `src/tool/mod.rs`, etc.). The moved
-test module must keep `use super::*;` so it sees the parent's items. Test count is invariant.
+For each big file: move its trailing `#[cfg(test)] mod <name> { ... }` block **verbatim** into a
+sibling `*_test.rs`, then replace the inline block with a `#[path]` declaration **kept inside the
+source file** (e.g. `#[cfg(test)] #[path = "messaging_test.rs"] mod tests;`). Keeping the
+declaration in the source file makes the test module a child of that module, so `use super::*;`
+still resolves to its scope — including the source file's private `use` imports and
+`pub(super)`/private items — and the move is truly verbatim. Test count is invariant; `mod.rs`
+is **not** modified.
+
+Why not the `mod.rs`-declaration convention (`src/llm/mod.rs`, `src/tool/mod.rs`)? That style
+only works when the parent re-exports the source module (`pub use openai::*`), so `super::*` in a
+sibling test file resolves through the re-export. `engine/mod.rs` does **not** re-export
+`messaging`/`mcp` (they are private impl-split modules), and even `openai`'s tests lean on
+`openai`-private imports that `pub use openai::*` would not carry. The in-source `#[path]`
+placement sidesteps both, so it is applied uniformly to all three files.
 
 ### Task 9: Extract `messaging.rs` tests
 
 **Files:**
 - Create: `mux-ffi/src/engine/messaging_test.rs`
-- Modify: `mux-ffi/src/engine/messaging.rs`, `mux-ffi/src/engine/mod.rs`
+- Modify: `mux-ffi/src/engine/messaging.rs` (no `engine/mod.rs` change)
 
-- [ ] **Step 1: Move the test module**
+- [ ] **Step 1: Create the sibling test file (verbatim body)**
 
-Cut everything from `#[cfg(test)]\nmod tests {` (≈line 637) to EOF out of `messaging.rs`. Paste
-into `messaging_test.rs`. Replace the wrapper `mod tests {` with the file body and ensure the
-first lines are the ABOUTME header + `use super::*;`:
+Move the **body** of the inline test module — `messaging.rs` lines 640–1670, i.e. everything
+between `mod tests {` and its closing `}` — verbatim into a new `messaging_test.rs`. Prefix the
+ABOUTME header; the first executable line stays `use super::*;` and nothing else changes:
 ```rust
-// ABOUTME: Tests for the engine messaging path (chat send, streaming, media).
+// ABOUTME: Tests for the engine messaging path (chat send, streaming, subagent task tool).
 // ABOUTME: Extracted verbatim from messaging.rs; behavior unchanged.
 use super::*;
+// … rest of the module body, unchanged …
 ```
-(Drop the now-redundant outer `mod tests { ... }` braces; the file *is* the module.)
 
-- [ ] **Step 2: Declare the sibling test module**
+- [ ] **Step 2: Replace the inline module with an in-source `#[path]` declaration**
 
-In `mux-ffi/src/engine/mod.rs`, find `mod messaging;` and add directly after it:
+In `messaging.rs`, replace the entire inline module (lines 638–1671, from `#[cfg(test)]` through
+its closing `}`) with:
 ```rust
 #[cfg(test)]
 #[path = "messaging_test.rs"]
-mod messaging_test;
+mod tests;
 ```
-(`#[path]` keeps the test as a submodule of `engine` with access to `super::*` items the
-tests use. If the tests reference items via `super::` that resolve to `messaging`'s scope,
-instead place `#[cfg(test)] mod messaging_test;` inside `messaging.rs`'s module — see Step 3.)
+Keep the declaration **inside `messaging.rs`** (not in `engine/mod.rs`): that makes `tests` a
+child of `messaging`, so `use super::*;` still resolves to `messaging`'s scope — its items plus
+its private `use` imports (`MuxEngine`, `StoredMessage`, `TaskToolEventProxy`, …). `#[path]`
+keeps the file a flat sibling instead of forcing a `messaging/` subdirectory. The module name
+stays `tests` (verbatim). Do **not** modify `engine/mod.rs`.
 
-- [ ] **Step 3: Resolve `super::*` scope**
-
-Run: `cargo test -p mux-ffi 2>&1 | rg '^error' | head`
-- If errors about unresolved `super::` items: the tests expect `messaging`'s scope. Fix by
-  declaring the module **from within `messaging.rs`** instead: remove the `engine/mod.rs`
-  declaration from Step 2 and add to the bottom of `messaging.rs`:
-  ```rust
-  #[cfg(test)]
-  mod messaging_test;
-  ```
-  and change the test file's `use super::*;` to import what it needs from
-  `crate::engine::messaging::*` / `super::super::*` as the compiler indicates.
-- Prefer whichever placement compiles with the **fewest import edits**; the goal is a verbatim
-  move, not a rewrite.
-
-- [ ] **Step 4: Verify count unchanged**
+- [ ] **Step 3: Verify count unchanged**
 
 Run: `cargo test -p mux-ffi 2>&1 | rg 'test result'`
 Expected: same number of `mux-ffi` tests as the floor; all `ok`.
 
-- [ ] **Step 5: Verify spine**
+- [ ] **Step 4: Verify spine**
 
 Run: `./scripts/verify-refactor.sh`
 Expected: fully green; `bindings byte-identical`.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
 git add -A
@@ -646,9 +690,9 @@ git commit -m "refactor(mux-ffi): extract messaging tests to messaging_test.rs"
 
 **Files:**
 - Create: `mux-ffi/src/engine/mcp_test.rs`
-- Modify: `mux-ffi/src/engine/mcp.rs`, `mux-ffi/src/engine/mod.rs`
+- Modify: `mux-ffi/src/engine/mcp.rs` (no `engine/mod.rs` change)
 
-- [ ] **Step 1–6:** Repeat Task 9's procedure for `mcp.rs` (tests begin ≈line 728). ABOUTME header:
+- [ ] **Step 1–5:** Repeat Task 9's procedure for `mcp.rs` (inline module is lines 696–1198; `mod tests`). ABOUTME header:
 ```rust
 // ABOUTME: Tests for the engine MCP integration (connect, list, call tools).
 // ABOUTME: Extracted verbatim from mcp.rs; behavior unchanged.
@@ -666,7 +710,7 @@ git commit -m "refactor(mux-ffi): extract mcp tests to mcp_test.rs"
 
 **Files:**
 - Create: `src/llm/openai_test.rs`
-- Modify: `src/llm/openai.rs`, `src/llm/mod.rs`
+- Modify: `src/llm/openai.rs` (no `llm/mod.rs` change)
 
 - [ ] **Step 1: Move tests** (begin ≈line 809) into `openai_test.rs` with header:
 ```rust
@@ -674,15 +718,17 @@ git commit -m "refactor(mux-ffi): extract mcp tests to mcp_test.rs"
 // ABOUTME: Extracted verbatim from openai.rs; behavior unchanged.
 use super::*;
 ```
-- [ ] **Step 2: Declare** in `src/llm/mod.rs` next to the other `#[cfg(test)] mod *_test;` lines:
+- [ ] **Step 2: Replace the inline module with an in-source `#[path]` declaration**
+
+In `openai.rs`, replace the entire inline module (lines 809–1008, `mod openai_test { … }`) with:
 ```rust
 #[cfg(test)]
+#[path = "openai_test.rs"]
 mod openai_test;
 ```
-Note: this test file references items as `super::*` = `llm` module scope (since the test
-module is declared in `llm/mod.rs`). The OpenAI items are re-exported into `llm` via
-`pub use openai::*`, so `use super::*;` resolves them. If any test used an item private to
-`openai`, declare the module inside `openai.rs` instead (as in Task 9 Step 3).
+Same in-source `#[path]` placement as Task 9: `openai_test` stays a child of `openai`, so
+`use super::*;` keeps resolving `openai`'s scope (including `openai`-private items the tests use,
+e.g. `try_into_openai_request`). Do **not** modify `src/llm/mod.rs`.
 - [ ] **Step 3: Verify** `cargo test -p mux 2>&1 | rg 'test result'` (count unchanged), then `./scripts/verify-refactor.sh`.
 - [ ] **Step 4: Commit**
 ```bash
