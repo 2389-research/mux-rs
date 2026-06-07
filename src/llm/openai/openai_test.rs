@@ -1,6 +1,7 @@
 // ABOUTME: Tests for the OpenAI client (request building, response parsing, media).
 // ABOUTME: Extracted verbatim from openai.rs; behavior unchanged.
 use super::*;
+use crate::llm::{ContentBlock, MediaKind, Message, Request, Role, ToolDefinition};
 
 #[test]
 fn test_client_from_env_missing() {

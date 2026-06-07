@@ -783,8 +783,8 @@ pub use convert::*;
 pub use response::*;
 pub use types::*;
 ```
-This preserves `pub use openai::*` in `src/llm/mod.rs` verbatim — no change needed there
-(except moving the test module declaration, Step 5).
+This preserves `pub use openai::*` in `src/llm/mod.rs` verbatim — `src/llm/mod.rs` needs **no
+change at all** (the test module is declared inside `openai`, not in `llm/mod.rs`).
 
 - [ ] **Step 4: Snapshot the public-item name set (after) and diff**
 
@@ -797,16 +797,27 @@ Expected: `PUBLIC ITEM SET UNCHANGED`. Any diff = a moved/renamed/forgotten publ
 
 - [ ] **Step 5: Relocate the test module**
 
-Move `src/llm/openai_test.rs` to `src/llm/openai/openai_test.rs`. In `src/llm/mod.rs`, the
-`#[cfg(test)] mod openai_test;` from Task 11 now resolves to `openai/openai_test.rs`? No —
-`mod openai_test;` looks for `openai_test.rs` beside `mod.rs` of `llm`. Keep the test as a
-submodule of `openai` instead: remove `mod openai_test;` from `src/llm/mod.rs` and add to
-`src/llm/openai/mod.rs`:
+Task 11 left the test declared **inside `openai.rs`** as
+`#[cfg(test)] #[path = "openai_test.rs"] mod openai_test;` (NOT in `llm/mod.rs`). When `openai.rs`
+becomes `openai/mod.rs`, move the file `src/llm/openai_test.rs` → `src/llm/openai/openai_test.rs`
+and replace that trailing declaration in `openai/mod.rs` with the plain form (no `#[path]` needed —
+a `mod.rs` resolves sibling files directly):
 ```rust
 #[cfg(test)]
 mod openai_test;
 ```
-Adjust the test's imports to `use super::*;` (now = the `openai` module, which re-exports all items).
+Leave `src/llm/mod.rs` untouched.
+
+**Import gotcha (the real risk):** the test keeps `use super::*;`, but `super` is now
+`openai/mod.rs`. Today the tests resolve `Request`, `Message`, `ContentBlock`, `Role`,
+`MediaKind`, `ToolDefinition` through `openai.rs`'s own `use super::{...}` import. After the split,
+`use super::*;` only sees what `openai/mod.rs` itself imports plus the
+`pub use {types,convert,response}::*` re-exports — which do NOT include those parent-crate types.
+Fix by adding the missing names to the **test file's** imports (e.g.
+`use crate::llm::{ContentBlock, MediaKind, Message, Request, Role, ToolDefinition};`); let the
+compiler name the unresolved ones. Do NOT add test-only `use`s to `openai/mod.rs` — an import the
+non-test code doesn't use trips `clippy -D warnings` (`unused_imports`). Test logic and the test
+count (13) stay identical.
 
 - [ ] **Step 6: Verify**
 
