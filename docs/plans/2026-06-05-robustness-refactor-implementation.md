@@ -860,7 +860,10 @@ Run: `sed -n '1,140p' mux-ffi/src/engine/messaging.rs`
   mod callback_hook;
   use callback_hook::ChatCallbackHook;
   ```
-- Move `messaging_test.rs` → `messaging/messaging_test.rs`; keep its `#[cfg(test)] mod messaging_test;` declaration in `messaging/mod.rs`.
+- Move `messaging_test.rs` → `messaging/messaging_test.rs`. The trailing test declaration is
+  `#[cfg(test)] #[path = "messaging_test.rs"] mod tests;` (module name `tests`, NOT `messaging_test`);
+  keep it **verbatim** in `messaging/mod.rs` — `#[path]` resolves relative to the `messaging/` dir, so
+  it finds the moved file. `engine/mod.rs` stays untouched (`mod messaging;` resolves to the new dir).
 
 - [ ] **Step 3: Update `engine/mod.rs`** — `mod messaging;` already resolves to `messaging/mod.rs`; no change unless the test declaration was there (move it into `messaging/mod.rs`).
 
