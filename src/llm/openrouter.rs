@@ -203,20 +203,21 @@ impl super::client::LlmClient for OpenRouterClient {
                         for choice in chunk.choices {
                             // Handle text content
                             if let Some(text) = choice.delta.content {
-                                // Emit ContentBlockStart for text on first text delta
-                                if text_block_index.is_none() {
-                                    let idx = next_block_index;
-                                    next_block_index += 1;
-                                    yield StreamEvent::ContentBlockStart {
-                                        index: idx,
-                                        block: ContentBlock::Text { text: String::new() },
-                                    };
-                                    text_block_index = Some(idx);
-                                }
-                                yield StreamEvent::ContentBlockDelta {
-                                    index: text_block_index.unwrap(),
-                                    text,
+                                // Emit ContentBlockStart for text on first text delta.
+                                let idx = match text_block_index {
+                                    Some(idx) => idx,
+                                    None => {
+                                        let idx = next_block_index;
+                                        next_block_index += 1;
+                                        yield StreamEvent::ContentBlockStart {
+                                            index: idx,
+                                            block: ContentBlock::Text { text: String::new() },
+                                        };
+                                        text_block_index = Some(idx);
+                                        idx
+                                    }
                                 };
+                                yield StreamEvent::ContentBlockDelta { index: idx, text };
                             }
 
                             // Handle tool calls
