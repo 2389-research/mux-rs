@@ -530,6 +530,9 @@ impl MuxEngine {
             match &provider_clone {
                 Provider::Custom { .. } => captured_custom_client
                     .clone()
+                    // Safe: captured_custom_client is Some whenever provider is Custom (set
+                    // just above). The factory closure type is infallible by design, so
+                    // propagating an error would change FfiTaskTool's contract.
                     .expect("Custom provider was captured at start of execute_task_tool"),
                 Provider::Anthropic => {
                     Arc::new(AnthropicClient::new(api_key.as_deref().unwrap_or("")))

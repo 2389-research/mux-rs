@@ -32,6 +32,8 @@ impl WebSearchTool {
             .timeout(std::time::Duration::from_secs(30))
             .user_agent("Mozilla/5.0 (compatible; mux-rs/0.2.0)")
             .build()
+            // Safe: reqwest client construction only fails on catastrophic TLS-backend
+            // init. Returning Result here would change the public `new()` signature.
             .expect("Failed to create HTTP client");
         Self { client }
     }
