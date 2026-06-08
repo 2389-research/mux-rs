@@ -4,13 +4,13 @@ use super::*;
 use crate::llm::{ContentBlock, MediaKind, Message, Request, Role, ToolDefinition};
 
 #[test]
-fn test_client_from_env_missing() {
-    // SAFETY: This test runs in isolation and only affects this process
-    unsafe {
-        std::env::remove_var("OPENAI_API_KEY");
-    }
-    let result = OpenAIClient::from_env();
-    assert!(result.is_err());
+fn test_client_from_env_var_missing() {
+    // Use a synthetic variable name guaranteed not to be set so the test
+    // exercises the missing-key path without racing against other parallel
+    // tests by mutating the process-global OPENAI_API_KEY.
+    let result = OpenAIClient::from_env_var("MUX_TEST_NONEXISTENT_API_KEY_FOR_OPENAI");
+    let err = result.expect_err("missing env var must produce an error");
+    assert!(matches!(err, crate::error::LlmError::Configuration(_)));
 }
 
 #[test]

@@ -36,12 +36,21 @@ impl OpenAIClient {
         }
     }
 
-    /// Create a new OpenAI client from the OPENAI_API_KEY environment variable.
-    pub fn from_env() -> Result<Self, LlmError> {
-        let api_key = std::env::var("OPENAI_API_KEY").map_err(|_| {
-            LlmError::Configuration("OPENAI_API_KEY environment variable not set".to_string())
+    /// Create a new OpenAI client from a named environment variable.
+    ///
+    /// Used as the basis for `from_env`. Also lets tests exercise the
+    /// missing-key error path with a synthetic variable name rather than
+    /// mutating the process-global `OPENAI_API_KEY`.
+    pub fn from_env_var(name: &str) -> Result<Self, LlmError> {
+        let api_key = std::env::var(name).map_err(|_| {
+            LlmError::Configuration(format!("{} environment variable not set", name))
         })?;
         Ok(Self::new(api_key))
+    }
+
+    /// Create a new OpenAI client from the OPENAI_API_KEY environment variable.
+    pub fn from_env() -> Result<Self, LlmError> {
+        Self::from_env_var("OPENAI_API_KEY")
     }
 
     /// Override the base URL for OpenAI-compatible APIs.
@@ -57,10 +66,8 @@ impl OpenAIClient {
 
     /// Create an OpenRouter client from the OPENROUTER_API_KEY environment variable.
     pub fn openrouter_from_env() -> Result<Self, LlmError> {
-        let api_key = std::env::var("OPENROUTER_API_KEY").map_err(|_| {
-            LlmError::Configuration("OPENROUTER_API_KEY environment variable not set".to_string())
-        })?;
-        Ok(Self::openrouter(api_key))
+        Ok(Self::from_env_var("OPENROUTER_API_KEY")?
+            .with_base_url("https://openrouter.ai/api/v1"))
     }
 
     /// Create an Ollama client connecting to localhost:11434.
