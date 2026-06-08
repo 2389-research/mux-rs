@@ -7,7 +7,12 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
 BINDGEN="${UNIFFI_BINDGEN:-$HOME/.cargo/bin/uniffi-bindgen}"
-LIB="target/debug/libmux_ffi.dylib"   # host (macOS) cdylib from crate-type
+case "$(uname -s)" in
+  Darwin)            LIB="target/debug/libmux_ffi.dylib" ;;
+  Linux)             LIB="target/debug/libmux_ffi.so" ;;
+  MINGW*|MSYS*|CYGWIN*) LIB="target/debug/mux_ffi.dll" ;;
+  *)                 LIB="target/debug/libmux_ffi.dylib" ;;
+esac
 OUT="target/verify"
 MODE="${1:-check}"                      # check | baseline
 
