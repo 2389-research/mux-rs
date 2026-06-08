@@ -95,6 +95,69 @@ fn test_add_mcp_server_workspace_not_found() {
 }
 
 #[test]
+fn test_add_mcp_server_rejects_empty_name() {
+    let engine = create_test_engine();
+    let ws = engine
+        .create_workspace("Empty Name".to_string(), None)
+        .unwrap();
+
+    let config = create_stdio_config("");
+    let result = engine.add_mcp_server(ws.id.clone(), config);
+    assert!(result.is_err());
+    assert!(result.unwrap_err().to_string().contains("name"));
+
+    engine.delete_workspace(ws.id).unwrap();
+}
+
+#[test]
+fn test_add_mcp_server_rejects_colon_in_name() {
+    // Server names are used as the "server:tool" qualified-name prefix and
+    // parsed via splitn(2, ':'). A colon in the server name silently
+    // mis-routes tool calls, so reject at the boundary.
+    let engine = create_test_engine();
+    let ws = engine
+        .create_workspace("Colon Name".to_string(), None)
+        .unwrap();
+
+    let config = create_stdio_config("foo:bar");
+    let result = engine.add_mcp_server(ws.id.clone(), config);
+    assert!(result.is_err());
+    assert!(result.unwrap_err().to_string().contains("':'"));
+
+    engine.delete_workspace(ws.id).unwrap();
+}
+
+#[test]
+fn test_update_mcp_server_rejects_empty_name() {
+    let engine = create_test_engine();
+    let ws = engine
+        .create_workspace("Update Empty".to_string(), None)
+        .unwrap();
+
+    let config = create_stdio_config("");
+    let result = engine.update_mcp_server(ws.id.clone(), config);
+    assert!(result.is_err());
+    assert!(result.unwrap_err().to_string().contains("name"));
+
+    engine.delete_workspace(ws.id).unwrap();
+}
+
+#[test]
+fn test_update_mcp_server_rejects_colon_in_name() {
+    let engine = create_test_engine();
+    let ws = engine
+        .create_workspace("Update Colon".to_string(), None)
+        .unwrap();
+
+    let config = create_stdio_config("foo:bar");
+    let result = engine.update_mcp_server(ws.id.clone(), config);
+    assert!(result.is_err());
+    assert!(result.unwrap_err().to_string().contains("':'"));
+
+    engine.delete_workspace(ws.id).unwrap();
+}
+
+#[test]
 fn test_remove_mcp_server() {
     let engine = create_test_engine();
     let ws = engine

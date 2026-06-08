@@ -14,11 +14,50 @@ use tokio::sync::Mutex as TokioMutex;
 
 /// MCP client management methods
 impl MuxEngine {
+    /// Acquire the per-workspace MCP lifecycle lock.
+    ///
+    /// Connect and disconnect operations for the same workspace serialize
+    /// through this lock so they cannot interleave. Different workspaces
+    /// remain independent.
+    async fn lifecycle_guard(&self, workspace_id: &str) -> tokio::sync::OwnedMutexGuard<()> {
+        let mutex = {
+            let mut guards = self.workspace_lifecycle.write();
+            guards
+                .entry(workspace_id.to_string())
+                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+                .clone()
+        };
+        mutex.lock_owned().await
+    }
+
+    /// Shut down and remove every connected MCP client for the workspace.
+    /// Caller must already hold the `lifecycle_guard` for this workspace.
+    async fn shutdown_workspace_clients(&self, workspace_id: &str) {
+        let clients = self.mcp_clients.write().remove(workspace_id);
+
+        if let Some(clients) = clients {
+            for (name, handle) in clients {
+                let client = handle.client.lock().await;
+                if let Err(e) = client.shutdown().await {
+                    eprintln!("Error shutting down MCP server '{}': {}", name, e);
+                }
+            }
+        }
+    }
+
     /// Connect to all enabled MCP servers for a workspace.
+    ///
+    /// Idempotent: if the workspace already has live MCP clients, they are
+    /// shut down before reconnecting. This prevents orphaned stdio child
+    /// processes / SSE sessions when the same workspace is reconnected
+    /// (e.g. after a config change). `McpClientHandle` has no `Drop` that
+    /// triggers `shutdown()`, so we must do this explicitly.
     pub(super) async fn do_connect_workspace_servers(
         &self,
         workspace_id: String,
     ) -> Result<(), String> {
+        let _guard = self.lifecycle_guard(&workspace_id).await;
+
         // Get enabled MCP server configs for this workspace
         let server_configs: Vec<McpServerConfig> = {
             let workspaces = self.workspaces.read();
@@ -32,6 +71,11 @@ impl MuxEngine {
                 .cloned()
                 .collect()
         };
+
+        // Always tear down any prior connections for this workspace before
+        // (re)connecting, so the active set reflects the current config.
+        // (Use the unlocked helper — we already hold the lifecycle guard.)
+        self.shutdown_workspace_clients(&workspace_id).await;
 
         if server_configs.is_empty() {
             return Ok(());
@@ -194,16 +238,8 @@ impl MuxEngine {
 
     /// Disconnect all MCP servers for a workspace.
     pub(super) async fn do_disconnect_workspace_servers(&self, workspace_id: &str) {
-        let clients = self.mcp_clients.write().remove(workspace_id);
-
-        if let Some(clients) = clients {
-            for (name, handle) in clients {
-                let client = handle.client.lock().await;
-                if let Err(e) = client.shutdown().await {
-                    eprintln!("Error shutting down MCP server '{}': {}", name, e);
-                }
-            }
-        }
+        let _guard = self.lifecycle_guard(workspace_id).await;
+        self.shutdown_workspace_clients(workspace_id).await;
     }
 
     /// Get all tools available for a workspace as ToolDefinitions for the LLM.

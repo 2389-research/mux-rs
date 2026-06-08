@@ -12,6 +12,25 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::runtime::Runtime;
 
+/// Reject MCP server names that would break the "server:tool" qualified-name
+/// scheme (parsed via `splitn(2, ':')` in `engine::helpers::parse_qualified_tool_name`).
+fn validate_server_name(name: &str) -> Result<(), MuxFfiError> {
+    if name.is_empty() {
+        return Err(MuxFfiError::Engine {
+            message: "MCP server name cannot be empty".to_string(),
+        });
+    }
+    if name.contains(':') {
+        return Err(MuxFfiError::Engine {
+            message: format!(
+                "MCP server name '{}' must not contain ':' (reserved as the server:tool separator)",
+                name
+            ),
+        });
+    }
+    Ok(())
+}
+
 /// MCP server configuration methods
 #[uniffi::export]
 impl MuxEngine {
@@ -20,6 +39,7 @@ impl MuxEngine {
         workspace_id: String,
         config: McpServerConfig,
     ) -> Result<(), MuxFfiError> {
+        validate_server_name(&config.name)?;
         let mut workspaces = self.workspaces.write();
         let workspace = workspaces
             .get_mut(&workspace_id)
@@ -81,6 +101,7 @@ impl MuxEngine {
         workspace_id: String,
         config: McpServerConfig,
     ) -> Result<(), MuxFfiError> {
+        validate_server_name(&config.name)?;
         let mut workspaces = self.workspaces.write();
         let workspace = workspaces
             .get_mut(&workspace_id)

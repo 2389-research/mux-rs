@@ -4,13 +4,13 @@ use super::*;
 use crate::llm::{ContentBlock, MediaKind, Message, Request, Role, ToolDefinition};
 
 #[test]
-fn test_client_from_env_missing() {
-    // SAFETY: This test runs in isolation and only affects this process
-    unsafe {
-        std::env::remove_var("OPENAI_API_KEY");
-    }
-    let result = OpenAIClient::from_env();
-    assert!(result.is_err());
+fn test_client_from_env_var_missing() {
+    // Use a synthetic variable name guaranteed not to be set so the test
+    // exercises the missing-key path without racing against other parallel
+    // tests by mutating the process-global OPENAI_API_KEY.
+    let result = OpenAIClient::from_env_var("MUX_TEST_NONEXISTENT_API_KEY_FOR_OPENAI");
+    let err = result.expect_err("missing env var must produce an error");
+    assert!(matches!(err, crate::error::LlmError::Configuration(_)));
 }
 
 #[test]
@@ -197,4 +197,90 @@ fn test_openai_supports_media() {
     assert!(c.supports_media(MediaKind::Document));
     assert!(c.supports_media(MediaKind::Audio));
     assert!(!c.supports_media(MediaKind::Video));
+}
+
+#[test]
+fn test_response_malformed_tool_arguments_propagates_error() {
+    use crate::error::LlmError;
+    use crate::llm::Response;
+
+    let resp = OpenAIResponse {
+        id: "resp_123".to_string(),
+        model: "gpt-4o".to_string(),
+        choices: vec![OpenAIChoice {
+            index: 0,
+            message: OpenAIResponseMessage {
+                role: "assistant".to_string(),
+                content: None,
+                tool_calls: Some(vec![OpenAIToolCall {
+                    id: "call_1".to_string(),
+                    call_type: "function".to_string(),
+                    function: OpenAIFunctionCall {
+                        name: "get_weather".to_string(),
+                        arguments: "{not valid json".to_string(),
+                    },
+                }]),
+            },
+            finish_reason: Some("tool_calls".to_string()),
+        }],
+        usage: None,
+    };
+
+    let result = Response::try_from(resp);
+    let err = result.expect_err("malformed tool arguments must propagate as error");
+    let message = err.to_string();
+    assert!(matches!(err, LlmError::Configuration(_)));
+    assert!(
+        message.contains("get_weather"),
+        "error must reference tool name, got: {}",
+        message
+    );
+}
+
+#[test]
+fn test_response_malformed_tool_arguments_omits_raw_payload() {
+    // Tool arguments may contain user-derived content from the model. The
+    // error message must NOT embed the raw payload — only a byte count and
+    // the serde parse position. Verify with a payload built from a marker
+    // string that would be conspicuous if leaked.
+    use crate::error::LlmError;
+    use crate::llm::Response;
+
+    const MARKER: &str = "SENSITIVE_USER_INPUT_THAT_MUST_NOT_LEAK";
+    let payload = format!("{{\"q\": \"{}\"", MARKER); // unterminated JSON
+    let resp = OpenAIResponse {
+        id: "resp_marker".to_string(),
+        model: "gpt-4o".to_string(),
+        choices: vec![OpenAIChoice {
+            index: 0,
+            message: OpenAIResponseMessage {
+                role: "assistant".to_string(),
+                content: None,
+                tool_calls: Some(vec![OpenAIToolCall {
+                    id: "call_marker".to_string(),
+                    call_type: "function".to_string(),
+                    function: OpenAIFunctionCall {
+                        name: "noisy_tool".to_string(),
+                        arguments: payload.clone(),
+                    },
+                }]),
+            },
+            finish_reason: Some("tool_calls".to_string()),
+        }],
+        usage: None,
+    };
+
+    let err = Response::try_from(resp).expect_err("malformed payload must error");
+    let message = err.to_string();
+    assert!(matches!(err, LlmError::Configuration(_)));
+    assert!(
+        !message.contains(MARKER),
+        "raw payload content must not appear in error message; got: {}",
+        message
+    );
+    assert!(
+        message.contains("bytes"),
+        "error must report the payload byte count; got: {}",
+        message
+    );
 }

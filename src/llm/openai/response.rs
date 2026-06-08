@@ -4,6 +4,7 @@
 use super::types::{
     OpenAIChoice, OpenAIResponse, OpenAIResponseMessage, OpenAIStreamChunk, OpenAIUsage,
 };
+use crate::error::LlmError;
 use crate::llm::{ContentBlock, Response, StopReason, Usage};
 
 pub(super) fn parse_stop_reason(s: Option<&str>) -> StopReason {
@@ -15,8 +16,10 @@ pub(super) fn parse_stop_reason(s: Option<&str>) -> StopReason {
     }
 }
 
-impl From<OpenAIResponse> for Response {
-    fn from(resp: OpenAIResponse) -> Self {
+impl TryFrom<OpenAIResponse> for Response {
+    type Error = LlmError;
+
+    fn try_from(resp: OpenAIResponse) -> Result<Self, Self::Error> {
         let choice = resp.choices.into_iter().next().unwrap_or(OpenAIChoice {
             index: 0,
             message: OpenAIResponseMessage {
@@ -39,8 +42,22 @@ impl From<OpenAIResponse> for Response {
         // Add tool calls if present
         if let Some(tool_calls) = choice.message.tool_calls {
             for call in tool_calls {
-                let input: serde_json::Value =
-                    serde_json::from_str(&call.function.arguments).unwrap_or_default();
+                // Propagate parse errors instead of silently substituting null —
+                // a tool dispatched with the wrong input shape produces a
+                // confusing downstream error far from the real cause. The raw
+                // arguments may contain user-derived content from the model's
+                // output, so deliberately do not embed them in the error. The
+                // serde error already pinpoints the parse position; include the
+                // total byte count for magnitude.
+                let input: serde_json::Value = serde_json::from_str(&call.function.arguments)
+                    .map_err(|e| {
+                        LlmError::Configuration(format!(
+                            "openai returned malformed JSON for tool '{}' arguments ({} bytes): {}",
+                            call.function.name,
+                            call.function.arguments.len(),
+                            e,
+                        ))
+                    })?;
                 content.push(ContentBlock::ToolUse {
                     id: call.id,
                     name: call.function.name,
@@ -55,7 +72,7 @@ impl From<OpenAIResponse> for Response {
             total_tokens: 0,
         });
 
-        Response {
+        Ok(Response {
             id: resp.id,
             content,
             stop_reason: parse_stop_reason(choice.finish_reason.as_deref()),
@@ -65,7 +82,7 @@ impl From<OpenAIResponse> for Response {
                 output_tokens: usage.completion_tokens,
                 ..Default::default()
             },
-        }
+        })
     }
 }
 
