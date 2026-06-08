@@ -1,0 +1,24 @@
+# ABOUTME: cargo-release configuration. Lockstep versioning across the workspace
+# ABOUTME: with vX.Y.Z tags. Run via `make release-{patch,minor,major}`.
+
+# Both crates released together; single shared version.
+shared-version = true
+
+# Tag at the workspace root, single tag for the whole release.
+tag-name = "v{{version}}"
+tag-message = "Release v{{version}}"
+pre-release-commit-message = "chore(release): v{{version}}"
+
+# Don't publish to crates.io by default. Override if needed.
+publish = false
+
+# Don't push immediately — let CI confirm green before tag is shared.
+# (cargo-release pushes by default; we want manual review.)
+push = false
+
+# Run tests before release.
+pre-release-hook = ["cargo", "test", "--workspace"]
+
+# Conventional-commit style message hook.
+sign-commit = false
+sign-tag = false
