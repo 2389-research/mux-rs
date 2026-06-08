@@ -157,11 +157,6 @@ impl mux::hook::Hook for CallbackProxyHook {
 /// Subagent implementation methods.
 impl MuxEngine {
     /// Internal implementation of spawn_agent.
-    // Holds a custom_tools read guard across `.await` while registering tools into a local
-    // registry; the awaited work uses a different lock, so this cannot self-deadlock. The
-    // snapshot-before-await fix changes lock-contention timing (a behavior change) and is
-    // deferred under the no-behavior-change freeze. See #11.
-    #[allow(clippy::await_holding_lock)]
     pub(super) async fn do_spawn_agent(
         &self,
         _workspace_id: String,
@@ -217,12 +212,19 @@ impl MuxEngine {
             registry.register_arc(tool.clone()).await;
         }
 
-        // Add custom tools to registry
-        {
-            let custom_tools = self.custom_tools.read();
-            for tool in custom_tools.values() {
-                registry.register_arc(tool.clone() as Arc<dyn Tool>).await;
-            }
+        // Add custom tools to registry. Snapshot the set under the read lock,
+        // then release the lock before any `.await` so registration cannot
+        // block concurrent writers of `custom_tools` for the duration of the
+        // loop. (Cannot self-deadlock because `registry` is local, but holding
+        // a non-async-aware lock across `.await` is still a footgun.)
+        let custom_tools: Vec<Arc<dyn Tool>> = self
+            .custom_tools
+            .read()
+            .values()
+            .map(|t| t.clone() as Arc<dyn Tool>)
+            .collect();
+        for tool in custom_tools {
+            registry.register_arc(tool).await;
         }
 
         // Create agent definition from config with allowed/denied tools
@@ -286,11 +288,6 @@ impl MuxEngine {
     }
 
     /// Internal implementation of resume_agent.
-    // Holds a custom_tools read guard across `.await` while registering tools into a local
-    // registry; the awaited work uses a different lock, so this cannot self-deadlock. The
-    // snapshot-before-await fix changes lock-contention timing (a behavior change) and is
-    // deferred under the no-behavior-change freeze. See #11.
-    #[allow(clippy::await_holding_lock)]
     pub(super) async fn do_resume_agent(
         &self,
         transcript: TranscriptData,
@@ -339,12 +336,19 @@ impl MuxEngine {
             registry.register_arc(tool.clone()).await;
         }
 
-        // Add custom tools to registry
-        {
-            let custom_tools = self.custom_tools.read();
-            for tool in custom_tools.values() {
-                registry.register_arc(tool.clone() as Arc<dyn Tool>).await;
-            }
+        // Add custom tools to registry. Snapshot the set under the read lock,
+        // then release the lock before any `.await` so registration cannot
+        // block concurrent writers of `custom_tools` for the duration of the
+        // loop. (Cannot self-deadlock because `registry` is local, but holding
+        // a non-async-aware lock across `.await` is still a footgun.)
+        let custom_tools: Vec<Arc<dyn Tool>> = self
+            .custom_tools
+            .read()
+            .values()
+            .map(|t| t.clone() as Arc<dyn Tool>)
+            .collect();
+        for tool in custom_tools {
+            registry.register_arc(tool).await;
         }
 
         // Create definition for resume
