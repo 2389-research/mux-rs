@@ -230,5 +230,9 @@ fn test_response_malformed_tool_arguments_propagates_error() {
     let err = result.expect_err("malformed tool arguments must propagate as error");
     let message = err.to_string();
     assert!(matches!(err, LlmError::Configuration(_)));
-    assert!(message.contains("get_weather"), "error must reference tool name, got: {}", message);
+    assert!(
+        message.contains("get_weather"),
+        "error must reference tool name, got: {}",
+        message
+    );
 }

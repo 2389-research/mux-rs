@@ -19,10 +19,7 @@ impl MuxEngine {
     /// Connect and disconnect operations for the same workspace serialize
     /// through this lock so they cannot interleave. Different workspaces
     /// remain independent.
-    async fn lifecycle_guard(
-        &self,
-        workspace_id: &str,
-    ) -> tokio::sync::OwnedMutexGuard<()> {
+    async fn lifecycle_guard(&self, workspace_id: &str) -> tokio::sync::OwnedMutexGuard<()> {
         let mutex = {
             let mut guards = self.workspace_lifecycle.write();
             guards

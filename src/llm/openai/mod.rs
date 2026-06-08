@@ -66,8 +66,7 @@ impl OpenAIClient {
 
     /// Create an OpenRouter client from the OPENROUTER_API_KEY environment variable.
     pub fn openrouter_from_env() -> Result<Self, LlmError> {
-        Ok(Self::from_env_var("OPENROUTER_API_KEY")?
-            .with_base_url("https://openrouter.ai/api/v1"))
+        Ok(Self::from_env_var("OPENROUTER_API_KEY")?.with_base_url("https://openrouter.ai/api/v1"))
     }
 
     /// Create an Ollama client connecting to localhost:11434.
