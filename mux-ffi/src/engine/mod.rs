@@ -59,6 +59,11 @@ pub struct MuxEngine {
     api_keys: Arc<RwLock<HashMap<Provider, ProviderConfig>>>,
     /// Connected MCP clients, keyed by workspace_id -> server_name -> handle
     mcp_clients: Arc<RwLock<HashMap<String, HashMap<String, McpClientHandle>>>>,
+    /// Per-workspace lifecycle mutex. `connect_workspace_servers` and
+    /// `disconnect_workspace_servers` for the same workspace serialize through
+    /// the per-workspace `tokio::sync::Mutex`, preventing the disconnect/connect
+    /// race described in #13.
+    workspace_lifecycle: Arc<RwLock<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
     /// Pending tool approval requests, keyed by tool_use_id -> oneshot sender
     pending_approvals: Arc<RwLock<HashMap<String, tokio::sync::oneshot::Sender<ApprovalDecision>>>>,
     /// Built-in tools from mux (always available)
@@ -121,6 +126,7 @@ impl MuxEngine {
             message_history: Arc::new(RwLock::new(message_history)),
             api_keys: Arc::new(RwLock::new(HashMap::new())),
             mcp_clients: Arc::new(RwLock::new(HashMap::new())),
+            workspace_lifecycle: Arc::new(RwLock::new(HashMap::new())),
             pending_approvals: Arc::new(RwLock::new(HashMap::new())),
             builtin_tools,
             agent_configs: Arc::new(RwLock::new(HashMap::new())),
