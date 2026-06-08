@@ -15,6 +15,12 @@ use tokio::sync::Mutex as TokioMutex;
 /// MCP client management methods
 impl MuxEngine {
     /// Connect to all enabled MCP servers for a workspace.
+    ///
+    /// Idempotent: if the workspace already has live MCP clients, they are
+    /// shut down before reconnecting. This prevents orphaned stdio child
+    /// processes / SSE sessions when the same workspace is reconnected
+    /// (e.g. after a config change). `McpClientHandle` has no `Drop` that
+    /// triggers `shutdown()`, so we must do this explicitly.
     pub(super) async fn do_connect_workspace_servers(
         &self,
         workspace_id: String,
@@ -32,6 +38,10 @@ impl MuxEngine {
                 .cloned()
                 .collect()
         };
+
+        // Always tear down any prior connections for this workspace before
+        // (re)connecting, so the active set reflects the current config.
+        self.do_disconnect_workspace_servers(&workspace_id).await;
 
         if server_configs.is_empty() {
             return Ok(());
