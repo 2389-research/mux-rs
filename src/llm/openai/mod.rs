@@ -41,10 +41,21 @@ impl OpenAIClient {
     /// Used as the basis for `from_env`. Also lets tests exercise the
     /// missing-key error path with a synthetic variable name rather than
     /// mutating the process-global `OPENAI_API_KEY`.
+    ///
+    /// Rejects both the "unset" and the "set but empty/whitespace-only"
+    /// cases — both indicate the operator did not actually configure a
+    /// key, and accepting `""` here just defers the failure to a confusing
+    /// 401 from the provider later.
     pub fn from_env_var(name: &str) -> Result<Self, LlmError> {
         let api_key = std::env::var(name).map_err(|_| {
             LlmError::Configuration(format!("{} environment variable not set", name))
         })?;
+        if api_key.trim().is_empty() {
+            return Err(LlmError::Configuration(format!(
+                "{} environment variable is set but empty",
+                name
+            )));
+        }
         Ok(Self::new(api_key))
     }
 
