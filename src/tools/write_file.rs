@@ -47,10 +47,10 @@ impl Tool for WriteFileTool {
         let params: Params = serde_json::from_value(params)?;
 
         // Create parent directories if needed
-        if let Some(parent) = Path::new(&params.path).parent() {
-            if !parent.as_os_str().is_empty() {
-                std::fs::create_dir_all(parent)?;
-            }
+        if let Some(parent) = Path::new(&params.path).parent()
+            && !parent.as_os_str().is_empty()
+        {
+            std::fs::create_dir_all(parent)?;
         }
 
         match std::fs::write(&params.path, &params.content) {

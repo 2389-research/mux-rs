@@ -3,7 +3,9 @@
 
 use super::client::StreamEvent;
 use super::media::resolve_request_media;
-use super::{CacheControl, ContentBlock, Message, Request, Response, StopReason, ToolDefinition, Usage};
+use super::{
+    CacheControl, ContentBlock, Message, Request, Response, StopReason, ToolDefinition, Usage,
+};
 use crate::error::LlmError;
 use async_trait::async_trait;
 use futures::Stream;
@@ -614,8 +616,14 @@ data: {"type":"message_start","message":{"id":"msg_01ABC","model":"claude-sonnet
                 assert_eq!(model, "claude-sonnet-4-5");
                 assert_eq!(usage.input_tokens, 1500);
                 assert_eq!(usage.output_tokens, 0);
-                assert_eq!(usage.cache_write_tokens, 4747, "cache_creation_input_tokens must map to cache_write_tokens");
-                assert_eq!(usage.cache_read_tokens, 2200, "cache_read_input_tokens must map to cache_read_tokens");
+                assert_eq!(
+                    usage.cache_write_tokens, 4747,
+                    "cache_creation_input_tokens must map to cache_write_tokens"
+                );
+                assert_eq!(
+                    usage.cache_read_tokens, 2200,
+                    "cache_read_input_tokens must map to cache_read_tokens"
+                );
             }
             other => panic!("expected MessageStart, got {:?}", other),
         }
@@ -633,8 +641,14 @@ data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input
         match parsed {
             StreamEvent::MessageDelta { usage, .. } => {
                 assert_eq!(usage.output_tokens, 120);
-                assert_eq!(usage.cache_write_tokens, 3000, "MessageDelta must surface cache_creation_input_tokens");
-                assert_eq!(usage.cache_read_tokens, 1100, "MessageDelta must surface cache_read_input_tokens");
+                assert_eq!(
+                    usage.cache_write_tokens, 3000,
+                    "MessageDelta must surface cache_creation_input_tokens"
+                );
+                assert_eq!(
+                    usage.cache_read_tokens, 1100,
+                    "MessageDelta must surface cache_read_input_tokens"
+                );
             }
             other => panic!("expected MessageDelta, got {:?}", other),
         }

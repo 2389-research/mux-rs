@@ -12,9 +12,9 @@ use tokio::sync::Mutex as TokioMutex;
 fn mcp_content_to_string(content: &[McpContentBlock]) -> String {
     content
         .iter()
-        .filter_map(|block| match block {
-            McpContentBlock::Text { text } => Some(text.as_str()),
-            McpContentBlock::Image { .. } => Some("[image]"),
+        .map(|block| match block {
+            McpContentBlock::Text { text } => text.as_str(),
+            McpContentBlock::Image { .. } => "[image]",
         })
         .collect::<Vec<_>>()
         .join("\n")
@@ -25,8 +25,6 @@ fn mcp_content_to_string(content: &[McpContentBlock]) -> String {
 pub struct McpToolWrapper {
     /// Full name as "server:tool" for the LLM
     qualified_name: String,
-    /// Server name for display
-    server_name: String,
     /// Tool name within the MCP server
     tool_name: String,
     /// Description from MCP server
@@ -49,17 +47,11 @@ impl McpToolWrapper {
         let qualified_name = format!("{}:{}", server_name, tool_name);
         Self {
             qualified_name,
-            server_name,
             tool_name,
             tool_description,
             tool_schema,
             client,
         }
-    }
-
-    /// Get the server name.
-    pub fn server_name(&self) -> &str {
-        &self.server_name
     }
 }
 

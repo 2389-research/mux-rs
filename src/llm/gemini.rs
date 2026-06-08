@@ -577,19 +577,21 @@ impl super::client::LlmClient for GeminiClient {
                             for part in candidate.content.parts {
                                 // Handle text content
                                 if let Some(text) = part.text {
-                                    // Start text block if needed
-                                    if current_text_index.is_none() {
-                                        yield StreamEvent::ContentBlockStart {
-                                            index: block_index,
-                                            block: ContentBlock::Text { text: String::new() },
-                                        };
-                                        current_text_index = Some(block_index);
-                                        block_index += 1;
-                                    }
-                                    yield StreamEvent::ContentBlockDelta {
-                                        index: current_text_index.unwrap(),
-                                        text,
+                                    // Start text block if needed.
+                                    let idx = match current_text_index {
+                                        Some(idx) => idx,
+                                        None => {
+                                            let idx = block_index;
+                                            yield StreamEvent::ContentBlockStart {
+                                                index: idx,
+                                                block: ContentBlock::Text { text: String::new() },
+                                            };
+                                            current_text_index = Some(idx);
+                                            block_index += 1;
+                                            idx
+                                        }
                                     };
+                                    yield StreamEvent::ContentBlockDelta { index: idx, text };
                                 }
 
                                 // Handle function calls

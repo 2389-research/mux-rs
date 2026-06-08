@@ -25,7 +25,9 @@ async fn main() {
         .max_tokens(100);
 
     println!("Call 1 (expect cache_write > 0):");
-    let r1 = LlmClient::create_message(&client, &req).await.expect("call 1 failed");
+    let r1 = LlmClient::create_message(&client, &req)
+        .await
+        .expect("call 1 failed");
     println!(
         "  in={} out={} cache_write={} cache_read={}",
         r1.usage.input_tokens,
@@ -35,7 +37,9 @@ async fn main() {
     );
 
     println!("\nCall 2 (expect cache_read > 0):");
-    let r2 = LlmClient::create_message(&client, &req).await.expect("call 2 failed");
+    let r2 = LlmClient::create_message(&client, &req)
+        .await
+        .expect("call 2 failed");
     println!(
         "  in={} out={} cache_write={} cache_read={}",
         r2.usage.input_tokens,

@@ -70,6 +70,9 @@ pub struct MuxEngine {
     /// Custom tools registered from Swift
     custom_tools: Arc<RwLock<HashMap<String, Arc<FfiToolBridge>>>>,
     /// Transcript storage for resume capability
+    // Unwired: the task/subagent tool is implemented and tested but not yet dispatched from the
+    // production chat loop. Retained until wired. See #9.
+    #[allow(dead_code)]
     transcript_store: Arc<MemoryTranscriptStore>,
     /// Default provider for new workspaces
     default_provider: Arc<RwLock<Provider>>,

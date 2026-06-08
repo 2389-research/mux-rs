@@ -264,8 +264,10 @@ impl SubAgent {
 
             // Tools: deterministically order + optionally mark cacheable.
             // See `finalize_tool_defs` for the rationale.
-            let tool_defs =
-                finalize_tool_defs(self.tools.to_definitions().await, self.definition.cache_tools);
+            let tool_defs = finalize_tool_defs(
+                self.tools.to_definitions().await,
+                self.definition.cache_tools,
+            );
 
             let request = request
                 .messages(self.messages.clone())
@@ -552,9 +554,7 @@ fn finalize_tool_defs(
     cache_tools: bool,
 ) -> Vec<crate::llm::ToolDefinition> {
     tool_defs.sort_by(|a, b| a.name.cmp(&b.name));
-    if cache_tools
-        && let Some(last) = tool_defs.last_mut()
-    {
+    if cache_tools && let Some(last) = tool_defs.last_mut() {
         last.cache_control = Some(crate::llm::CacheControl::ephemeral());
     }
     tool_defs
@@ -601,7 +601,12 @@ mod tests {
     fn finalize_tool_defs_sorts_by_name() {
         // Sort must be deterministic regardless of input order, since the
         // upstream registry is HashMap-backed. Tests the CodeRabbit catch.
-        let input = vec![td("write"), td("read_state"), td("apply"), td("emit_narration")];
+        let input = vec![
+            td("write"),
+            td("read_state"),
+            td("apply"),
+            td("emit_narration"),
+        ];
         let out = finalize_tool_defs(input, false);
         let names: Vec<&str> = out.iter().map(|t| t.name.as_str()).collect();
         assert_eq!(
@@ -617,9 +622,18 @@ mod tests {
         // mark only one. Tests the original "mark all tools" bug fix.
         let input = vec![td("a"), td("b"), td("c"), td("d")];
         let out = finalize_tool_defs(input, true);
-        assert!(out[0].cache_control.is_none(), "first tool must NOT be marked");
-        assert!(out[1].cache_control.is_none(), "second tool must NOT be marked");
-        assert!(out[2].cache_control.is_none(), "third tool must NOT be marked");
+        assert!(
+            out[0].cache_control.is_none(),
+            "first tool must NOT be marked"
+        );
+        assert!(
+            out[1].cache_control.is_none(),
+            "second tool must NOT be marked"
+        );
+        assert!(
+            out[2].cache_control.is_none(),
+            "third tool must NOT be marked"
+        );
         assert!(
             out[3].cache_control.is_some(),
             "last tool MUST be marked when cache_tools=true"

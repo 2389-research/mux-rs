@@ -40,12 +40,11 @@ impl StreamAccumulator {
                     _ => {}
                 }
             }
-            StreamEvent::ContentBlockDelta { text, .. } => {
+            StreamEvent::ContentBlockDelta { text, .. }
                 // Text content delta - only accumulate if not in a tool block
-                if self.current_tool_id.is_none() {
+                if self.current_tool_id.is_none() => {
                     self.current_text.push_str(&text);
                 }
-            }
             StreamEvent::InputJsonDelta { partial_json, .. } => {
                 // Tool input JSON delta - accumulate for tool calls
                 self.current_tool_input.push_str(&partial_json);
@@ -83,12 +82,7 @@ async fn run_agent_loop(registry: &Registry) -> Result<()> {
 
     println!("Code Agent (streaming) - Type 'quit' to exit.\n");
 
-    loop {
-        let line = match rl.readline("> ") {
-            Ok(line) => line,
-            Err(_) => break,
-        };
-
+    while let Ok(line) = rl.readline("> ") {
         let line = line.trim();
         if line.is_empty() {
             continue;
@@ -117,16 +111,16 @@ async fn run_agent_loop(registry: &Registry) -> Result<()> {
                 let event = event?;
 
                 // Print text deltas as they arrive
-                if let StreamEvent::ContentBlockDelta { ref text, .. } = event {
-                    if accumulator.current_tool_id.is_none() {
-                        // Only print if we're in a text block, not tool input
-                        if !printed_newline {
-                            println!();
-                            printed_newline = true;
-                        }
-                        print!("{}", text);
-                        std::io::stdout().flush()?;
+                if let StreamEvent::ContentBlockDelta { ref text, .. } = event
+                    && accumulator.current_tool_id.is_none()
+                {
+                    // Only print if we're in a text block, not tool input
+                    if !printed_newline {
+                        println!();
+                        printed_newline = true;
                     }
+                    print!("{}", text);
+                    std::io::stdout().flush()?;
                 }
 
                 // Show when tool calls start

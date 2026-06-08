@@ -191,8 +191,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_connect_with_args() {
-        let result =
-            StdioTransport::connect(echo_command(), &echo_args(), &HashMap::new()).await;
+        let result = StdioTransport::connect(echo_command(), &echo_args(), &HashMap::new()).await;
 
         // Should succeed in spawning
         assert!(result.is_ok());
@@ -204,10 +203,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_shutdown_cleans_up() {
-        let transport =
-            StdioTransport::connect(echo_command(), &echo_args(), &HashMap::new())
-                .await
-                .unwrap();
+        let transport = StdioTransport::connect(echo_command(), &echo_args(), &HashMap::new())
+            .await
+            .unwrap();
 
         // Shutdown should succeed
         let result = transport.shutdown().await;

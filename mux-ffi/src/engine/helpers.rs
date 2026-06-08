@@ -3,6 +3,9 @@
 
 /// Parse a qualified tool name (server:tool) into its components.
 /// Returns None if the name doesn't contain a colon separator.
+// Unwired: the task/subagent tool is implemented and tested but not yet dispatched from the
+// production chat loop. Retained until wired. See #9.
+#[allow(dead_code)]
 pub(crate) fn parse_qualified_tool_name(qualified_name: &str) -> Option<(String, String)> {
     let parts: Vec<&str> = qualified_name.splitn(2, ':').collect();
     if parts.len() == 2 {

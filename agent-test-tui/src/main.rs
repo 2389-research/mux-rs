@@ -76,12 +76,7 @@ async fn run_agent_loop(registry: &Registry) -> Result<()> {
 
     println!("Type 'quit' to exit.\n");
 
-    loop {
-        let line = match rl.readline("> ") {
-            Ok(line) => line,
-            Err(_) => break,
-        };
-
+    while let Ok(line) = rl.readline("> ") {
         let line = line.trim();
         if line.is_empty() {
             continue;

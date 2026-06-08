@@ -1,111 +1,87 @@
-// ABOUTME: OpenRouter API client wrapping OpenAI-compatible API.
-// ABOUTME: Supports custom HTTP-Referer and X-Title headers for app identification.
+// ABOUTME: OpenAI provider client and LlmClient implementation.
+// ABOUTME: Wire types live in types.rs, request building in convert.rs, parsing in response.rs.
+mod convert;
+mod response;
+mod types;
+
+pub use convert::*;
+pub use response::*;
+pub use types::*;
 
 use super::client::StreamEvent;
 use super::media::resolve_request_media;
-use super::openai::{OpenAIError, OpenAIResponse, parse_sse_line, try_into_openai_request};
-use super::{ContentBlock, Request, Response, StopReason, Usage};
 use crate::error::LlmError;
+use crate::llm::{ContentBlock, Request, Response, Usage};
 use async_trait::async_trait;
 use futures::Stream;
-use reqwest::header::{HeaderMap, HeaderValue};
 use std::pin::Pin;
 
-/// Base URL for OpenRouter's OpenAI-compatible API.
-pub const OPENROUTER_BASE_URL: &str = "https://openrouter.ai/api/v1";
+const OPENAI_DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
 
-/// Default model when none is specified.
-pub const OPENROUTER_DEFAULT_MODEL: &str = "anthropic/claude-3.5-sonnet";
-
-/// Client for OpenRouter API.
-/// OpenRouter provides a unified API that routes to various LLM providers.
+/// Client for OpenAI and OpenAI-compatible APIs (OpenRouter, Ollama, etc.).
 #[derive(Debug, Clone)]
-pub struct OpenRouterClient {
+pub struct OpenAIClient {
     api_key: String,
+    base_url: String,
     http: reqwest::Client,
-    default_model: String,
 }
 
-impl OpenRouterClient {
-    /// Create a new OpenRouter client with the given API key.
+impl OpenAIClient {
+    /// Create a new OpenAI client with the given API key.
     pub fn new(api_key: impl Into<String>) -> Self {
-        Self::with_headers(api_key, None, None)
+        Self {
+            api_key: api_key.into(),
+            base_url: OPENAI_DEFAULT_BASE_URL.to_string(),
+            http: reqwest::Client::new(),
+        }
     }
 
-    /// Create a new OpenRouter client from the OPENROUTER_API_KEY environment variable.
+    /// Create a new OpenAI client from the OPENAI_API_KEY environment variable.
     pub fn from_env() -> Result<Self, LlmError> {
-        let api_key = std::env::var("OPENROUTER_API_KEY").map_err(|_| LlmError::Api {
+        let api_key = std::env::var("OPENAI_API_KEY").map_err(|_| LlmError::Api {
             status: 0,
-            message: "OPENROUTER_API_KEY environment variable not set".to_string(),
+            message: "OPENAI_API_KEY environment variable not set".to_string(),
         })?;
         Ok(Self::new(api_key))
     }
 
-    /// Create a new OpenRouter client with custom headers for app identification.
-    ///
-    /// # Arguments
-    /// * `api_key` - OpenRouter API key
-    /// * `referer` - HTTP-Referer header (your app's URL, helps OpenRouter track usage)
-    /// * `title` - X-Title header (your app's name, displayed in OpenRouter dashboard)
-    pub fn with_headers(
-        api_key: impl Into<String>,
-        referer: Option<&str>,
-        title: Option<&str>,
-    ) -> Self {
-        let mut headers = HeaderMap::new();
-
-        if let Some(referer) = referer
-            && let Ok(value) = HeaderValue::from_str(referer)
-        {
-            headers.insert("HTTP-Referer", value);
-        }
-
-        if let Some(title) = title
-            && let Ok(value) = HeaderValue::from_str(title)
-        {
-            headers.insert("X-Title", value);
-        }
-
-        let http = reqwest::Client::builder()
-            .default_headers(headers)
-            .build()
-            .unwrap_or_else(|_| reqwest::Client::new());
-
-        Self {
-            api_key: api_key.into(),
-            http,
-            default_model: OPENROUTER_DEFAULT_MODEL.to_string(),
-        }
-    }
-
-    /// Set the default model to use when none is specified in the request.
-    pub fn with_default_model(mut self, model: impl Into<String>) -> Self {
-        self.default_model = model.into();
+    /// Override the base URL for OpenAI-compatible APIs.
+    pub fn with_base_url(mut self, url: impl Into<String>) -> Self {
+        self.base_url = url.into();
         self
     }
-}
 
-fn parse_stop_reason(s: Option<&str>) -> StopReason {
-    match s {
-        Some("stop") => StopReason::EndTurn,
-        Some("tool_calls") => StopReason::ToolUse,
-        Some("length") => StopReason::MaxTokens,
-        _ => StopReason::EndTurn,
+    /// Create an OpenRouter client with the given API key.
+    pub fn openrouter(api_key: impl Into<String>) -> Self {
+        Self::new(api_key).with_base_url("https://openrouter.ai/api/v1")
+    }
+
+    /// Create an OpenRouter client from the OPENROUTER_API_KEY environment variable.
+    pub fn openrouter_from_env() -> Result<Self, LlmError> {
+        let api_key = std::env::var("OPENROUTER_API_KEY").map_err(|_| LlmError::Api {
+            status: 0,
+            message: "OPENROUTER_API_KEY environment variable not set".to_string(),
+        })?;
+        Ok(Self::openrouter(api_key))
+    }
+
+    /// Create an Ollama client connecting to localhost:11434.
+    pub fn ollama() -> Self {
+        Self::new("ollama").with_base_url("http://localhost:11434/v1")
+    }
+
+    /// Create an Ollama client connecting to a custom host.
+    pub fn ollama_at(host: impl Into<String>) -> Self {
+        Self::new("ollama").with_base_url(format!("{}/v1", host.into()))
     }
 }
 
 #[async_trait]
-impl super::client::LlmClient for OpenRouterClient {
+impl super::client::LlmClient for OpenAIClient {
     async fn create_message(&self, req: &Request) -> Result<Response, LlmError> {
         let resolved = resolve_request_media(req, &self.http).await?;
-        let mut openai_req = try_into_openai_request(&resolved)?;
-
-        // Use default model if none specified
-        if openai_req.model.is_empty() {
-            openai_req.model = self.default_model.clone();
-        }
-
-        let url = format!("{}/chat/completions", OPENROUTER_BASE_URL);
+        let openai_req = try_into_openai_request(&resolved)?;
+        let url = format!("{}/chat/completions", self.base_url);
 
         let response = self
             .http
@@ -134,22 +110,16 @@ impl super::client::LlmClient for OpenRouterClient {
         req: &Request,
     ) -> Pin<Box<dyn Stream<Item = Result<StreamEvent, LlmError>> + Send + 'static>> {
         let api_key = self.api_key.clone();
+        let base_url = self.base_url.clone();
         let http = self.http.clone();
-        let default_model = self.default_model.clone();
         let req = req.clone();
 
         Box::pin(async_stream::try_stream! {
             let resolved = resolve_request_media(&req, &http).await?;
             let mut openai_req = try_into_openai_request(&resolved)?;
-
-            // Use default model if none specified
-            if openai_req.model.is_empty() {
-                openai_req.model = default_model;
-            }
-
             openai_req.stream = Some(true);
 
-            let url = format!("{}/chat/completions", OPENROUTER_BASE_URL);
+            let url = format!("{}/chat/completions", base_url);
             let response = http
                 .post(&url)
                 .header("Authorization", format!("Bearer {}", api_key))
@@ -282,7 +252,7 @@ impl super::client::LlmClient for OpenRouterClient {
                                 }
 
                                 yield StreamEvent::MessageDelta {
-                                    stop_reason: Some(parse_stop_reason(Some(&reason))),
+                                    stop_reason: Some(response::parse_stop_reason(Some(&reason))),
                                     usage: Usage::default(),
                                 };
                                 yield StreamEvent::MessageStop;
@@ -304,72 +274,4 @@ impl super::client::LlmClient for OpenRouterClient {
 }
 
 #[cfg(test)]
-mod openrouter_test {
-    use super::*;
-    use crate::llm::{LlmClient, MediaKind, Message};
-
-    #[test]
-    fn test_openrouter_supports_media() {
-        let c = OpenRouterClient::new("fake");
-        assert!(c.supports_media(MediaKind::Image));
-        assert!(c.supports_media(MediaKind::Document));
-        assert!(c.supports_media(MediaKind::Audio));
-        assert!(!c.supports_media(MediaKind::Video));
-    }
-
-    #[test]
-    fn test_client_from_env_missing() {
-        // SAFETY: This test runs in isolation and only affects this process
-        unsafe {
-            std::env::remove_var("OPENROUTER_API_KEY");
-        }
-        let result = OpenRouterClient::from_env();
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_client_new() {
-        let client = OpenRouterClient::new("test-key");
-        assert_eq!(client.api_key, "test-key");
-        assert_eq!(client.default_model, OPENROUTER_DEFAULT_MODEL);
-    }
-
-    #[test]
-    fn test_client_with_headers() {
-        let client =
-            OpenRouterClient::with_headers("test-key", Some("https://myapp.com"), Some("MyApp"));
-        assert_eq!(client.api_key, "test-key");
-        // Headers are set on the http client internally
-    }
-
-    #[test]
-    fn test_client_with_default_model() {
-        let client = OpenRouterClient::new("test-key").with_default_model("openai/gpt-4-turbo");
-        assert_eq!(client.default_model, "openai/gpt-4-turbo");
-    }
-
-    #[test]
-    fn test_constants() {
-        assert_eq!(OPENROUTER_BASE_URL, "https://openrouter.ai/api/v1");
-        assert_eq!(OPENROUTER_DEFAULT_MODEL, "anthropic/claude-3.5-sonnet");
-    }
-
-    #[tokio::test]
-    async fn test_openrouter_resolves_image_path() {
-        // Confirms that a MediaSource::Path for an image is resolved to Base64
-        // before serialization. We can't actually hit the OpenRouter API in a
-        // unit test, but we can verify that path resolution runs first: if the
-        // path doesn't exist, we should get an Io error, not a Configuration
-        // error saying "Path must be resolved".
-        let c = OpenRouterClient::new("fake");
-        let req = Request::new("anthropic/claude-3.5-sonnet").message(Message::user_with(vec![
-            ContentBlock::image_path(std::path::PathBuf::from("/nonexistent/path/image.png")),
-        ]));
-        let result = c.create_message(&req).await;
-        assert!(
-            matches!(result, Err(crate::error::LlmError::Io(_))),
-            "expected Io error for missing file, got {:?}",
-            result
-        );
-    }
-}
+mod openai_test;

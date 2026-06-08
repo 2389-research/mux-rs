@@ -61,19 +61,18 @@ impl Tool for SearchTool {
         };
 
         for entry in glob::glob(&full_pattern).unwrap_or_else(|_| glob::glob("").unwrap()) {
-            if let Ok(path) = entry {
-                if path.is_file() {
-                    if let Ok(content) = std::fs::read_to_string(&path) {
-                        for (line_num, line) in content.lines().enumerate() {
-                            if regex.is_match(line) {
-                                results.push(format!(
-                                    "{}:{}: {}",
-                                    path.display(),
-                                    line_num + 1,
-                                    line.trim()
-                                ));
-                            }
-                        }
+            if let Ok(path) = entry
+                && path.is_file()
+                && let Ok(content) = std::fs::read_to_string(&path)
+            {
+                for (line_num, line) in content.lines().enumerate() {
+                    if regex.is_match(line) {
+                        results.push(format!(
+                            "{}:{}: {}",
+                            path.display(),
+                            line_num + 1,
+                            line.trim()
+                        ));
                     }
                 }
             }

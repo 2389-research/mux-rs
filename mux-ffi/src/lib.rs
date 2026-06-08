@@ -438,12 +438,15 @@ mod tests {
             .create_conversation(ws.id.clone(), "Test".to_string())
             .unwrap();
 
-        // Add messages
+        // Each message is ~1024 tokens (4096 bytes / APPROX_BYTES_PER_TOKEN=4); the five
+        // together (~5120 tokens) exceed the effective limit
+        // (4096 * SAFETY_MARGIN=0.8 ≈ 3276 tokens), so truncation must drop the oldest
+        // messages while keeping the most recent.
         for i in 0..5 {
             engine.inject_test_message(
                 &conv.id,
                 Role::User,
-                &format!("Message {} with content to consume tokens", i),
+                &format!("Message {} {}", i, "x".repeat(4096)),
             );
         }
 
@@ -454,6 +457,16 @@ mod tests {
         assert!(
             result.is_ok(),
             "Small context compaction should succeed via truncation"
+        );
+
+        let after = engine.get_message_count(&conv.id);
+        assert!(
+            after < before,
+            "truncation must drop the oldest over-budget messages (before={before}, after={after})"
+        );
+        assert!(
+            after >= 1,
+            "truncation must retain the most recent message (after={after})"
         );
 
         // Cleanup

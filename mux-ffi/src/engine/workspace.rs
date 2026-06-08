@@ -117,7 +117,7 @@ impl MuxEngine {
         let mut conversations = self.conversations.write();
         conversations
             .entry(workspace_id)
-            .or_insert_with(Vec::new)
+            .or_default()
             .push(conversation.clone());
 
         // Initialize empty message history for this conversation

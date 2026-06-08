@@ -115,7 +115,7 @@ impl ModelContextConfig {
 /// Estimate token count from text using byte-based heuristic
 pub fn estimate_tokens(text: &str) -> u32 {
     let bytes = text.len();
-    ((bytes + APPROX_BYTES_PER_TOKEN - 1) / APPROX_BYTES_PER_TOKEN) as u32
+    bytes.div_ceil(APPROX_BYTES_PER_TOKEN) as u32
 }
 
 /// Calculate effective limit with safety margin.

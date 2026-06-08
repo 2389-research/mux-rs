@@ -51,11 +51,12 @@ impl Tool for ListFilesTool {
             .to_string();
 
         let mut files = Vec::new();
-        for entry in glob::glob(&full_pattern).unwrap_or_else(|_| glob::glob("").unwrap()) {
-            if let Ok(path) = entry {
-                let prefix = if path.is_dir() { "[dir] " } else { "" };
-                files.push(format!("{}{}", prefix, path.display()));
-            }
+        for path in glob::glob(&full_pattern)
+            .unwrap_or_else(|_| glob::glob("").unwrap())
+            .flatten()
+        {
+            let prefix = if path.is_dir() { "[dir] " } else { "" };
+            files.push(format!("{}{}", prefix, path.display()));
         }
 
         if files.is_empty() {

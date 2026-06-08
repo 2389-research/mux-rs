@@ -37,7 +37,7 @@ pub async fn resolve_to_base64(
             // Single-handle bounded stream read avoids the TOCTOU window that
             // a separate `metadata()` + `read()` would introduce. We read up
             // to MAX_MEDIA_BYTES + 1 bytes; if we got more than MAX, reject.
-            let mut file = tokio::fs::File::open(p).await?;
+            let file = tokio::fs::File::open(p).await?;
             let mut bytes = Vec::new();
             let n = file
                 .take(MAX_MEDIA_BYTES + 1)

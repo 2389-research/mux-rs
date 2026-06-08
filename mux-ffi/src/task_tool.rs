@@ -11,6 +11,9 @@ use mux::hook::{Hook, HookAction, HookEvent, HookRegistry};
 use mux::llm::LlmClient;
 use mux::tool::{Registry, Tool, ToolResult};
 
+/// Factory that builds an LLM client for a given model name.
+type LlmClientFactory = Arc<dyn Fn(&str) -> Arc<dyn LlmClient> + Send + Sync>;
+
 /// A hook that proxies SubAgent events to Swift's SubagentEventHandler.
 struct SubagentEventProxyHook {
     agent_id: String,
@@ -112,7 +115,7 @@ pub struct FfiTaskTool {
     tool_registry: Registry,
 
     /// Factory function to create LLM clients for subagents.
-    client_factory: Arc<dyn Fn(&str) -> Arc<dyn LlmClient> + Send + Sync>,
+    client_factory: LlmClientFactory,
 
     /// Optional transcript store for agent resume.
     transcript_store: Option<Arc<dyn TranscriptStore>>,
@@ -452,13 +455,7 @@ mod tests {
 
         fn on_stream_delta(&self, _subagent_id: String, _text: String) {}
 
-        fn on_stream_usage(
-            &self,
-            _subagent_id: String,
-            _input_tokens: u32,
-            _output_tokens: u32,
-        ) {
-        }
+        fn on_stream_usage(&self, _subagent_id: String, _input_tokens: u32, _output_tokens: u32) {}
     }
 
     #[tokio::test]
