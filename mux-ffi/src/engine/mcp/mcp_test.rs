@@ -6,7 +6,7 @@ use crate::types::McpServerConfig;
 
 fn test_dir(name: &str) -> String {
     std::env::temp_dir()
-        .join(name)
+        .join(format!("{}-{}", name, uuid::Uuid::new_v4()))
         .to_string_lossy()
         .to_string()
 }
