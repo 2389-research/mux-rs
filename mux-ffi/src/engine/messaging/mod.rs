@@ -464,14 +464,28 @@ impl MuxEngine {
     /// once via `execute_task_tool` for unit testing.
     pub(super) async fn try_build_ffi_task_tool(&self) -> Result<FfiTaskTool, String> {
         let provider = self.default_provider.read().clone();
-        if let Provider::Custom { ref name } = provider
-            && !self.callback_providers.read().contains_key(name)
-        {
-            return Err(format!(
-                "Custom LLM provider '{}' not registered. Call register_llm_provider first.",
-                name
-            ));
-        }
+
+        // Capture the custom provider's client atomically with validation so a
+        // concurrent `unregister_llm_provider` between here and the factory's
+        // first call cannot turn a build-time Ok into a runtime panic. If the
+        // lookup fails we fail the build cleanly; the factory closure then
+        // operates on a guaranteed-Some `captured_custom_client`.
+        let captured_custom_client: Option<Arc<dyn LlmClient>> = match &provider {
+            Provider::Custom { name } => Some(
+                self.callback_providers
+                    .read()
+                    .get(name)
+                    .cloned()
+                    .map(|c| c as Arc<dyn LlmClient>)
+                    .ok_or_else(|| {
+                        format!(
+                            "Custom LLM provider '{}' not registered. Call register_llm_provider first.",
+                            name
+                        )
+                    })?,
+            ),
+            _ => None,
+        };
 
         // Snapshot agent configs before any `.await` so the registration
         // loop doesn't hold the read guard across await points.
@@ -544,25 +558,14 @@ impl MuxEngine {
         let api_key = provider_config.as_ref().map(|c| c.api_key.clone());
         let base_url = provider_config.as_ref().and_then(|c| c.base_url.clone());
 
-        // Capture the custom client Arc upfront so the factory closure
-        // can't race against a later `unregister_llm_provider`.
-        let captured_custom_client: Option<Arc<dyn LlmClient>> = match &provider {
-            Provider::Custom { name } => self
-                .callback_providers
-                .read()
-                .get(name)
-                .cloned()
-                .map(|c| c as Arc<dyn LlmClient>),
-            _ => None,
-        };
-
         let client_factory = move |_model: &str| -> Arc<dyn LlmClient> {
             match &provider_clone {
                 Provider::Custom { .. } => captured_custom_client
                     .clone()
-                    // Safe: captured_custom_client is Some whenever provider is Custom
-                    // (set just above). The factory type is infallible by design.
-                    .expect("Custom provider was captured at task tool build"),
+                    // Invariant: when `provider` is `Custom`, the match above
+                    // populated `captured_custom_client` with `Some(_)` or
+                    // returned `Err` before reaching this point.
+                    .expect("invariant: custom provider validated and captured at build"),
                 Provider::Anthropic => {
                     Arc::new(AnthropicClient::new(api_key.as_deref().unwrap_or("")))
                 }
