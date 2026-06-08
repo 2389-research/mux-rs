@@ -244,8 +244,10 @@ impl MuxEngine {
 
     /// Get all tools available for a workspace as ToolDefinitions for the LLM.
     /// Includes built-in mux tools, custom tools, and any connected MCP server tools.
-    // Unwired: the task/subagent tool is implemented and tested but not yet dispatched from the
-    // production chat loop. Retained until wired. See #9.
+    // Catalog/inspection API kept alongside the executable Registry built by
+    // `messaging::build_tool_registry`. Currently consumed only by tests;
+    // retained as a candidate FFI surface for hosts that want to enumerate
+    // available tools without running a chat turn.
     #[allow(dead_code)]
     pub(super) fn get_workspace_tools(&self, workspace_id: &str) -> Vec<ToolDefinition> {
         let mut tools = Vec::new();
@@ -331,8 +333,10 @@ impl MuxEngine {
     }
 
     /// Find the MCP client and tool name for a qualified tool name (server:tool).
-    // Unwired: the task/subagent tool is implemented and tested but not yet dispatched from the
-    // production chat loop. Retained until wired. See #9.
+    // Tool dispatch goes through the executable Registry (keyed by full
+    // qualified name), so this helper is unused in production today. Kept
+    // alongside `get_workspace_tools` as a candidate FFI surface for hosts
+    // that want to introspect or route tool calls directly.
     #[allow(dead_code)]
     pub(super) fn parse_tool_name(&self, qualified_name: &str) -> Option<(String, String)> {
         helpers::parse_qualified_tool_name(qualified_name)

@@ -14,10 +14,11 @@ use parking_lot::RwLock;
 use std::sync::Arc;
 
 /// Proxy that forwards SubagentEventHandler calls to the engine's stored handler.
-/// Used by execute_task_tool to forward events from the TaskTool.
-// Unwired: the task/subagent tool is implemented and tested but not yet dispatched from the
-// production chat loop. Retained until wired. See #9.
-#[allow(dead_code)]
+///
+/// Used by `try_build_ffi_task_tool` to attach the host's registered handler
+/// to the spawned subagent's event stream. The proxy late-binds (reads
+/// `engine_handler` at event time) so a handler swap mid-conversation is
+/// honored by in-flight subagents.
 pub(super) struct TaskToolEventProxy {
     pub engine_handler: Arc<RwLock<Option<Box<dyn SubagentEventHandler>>>>,
 }

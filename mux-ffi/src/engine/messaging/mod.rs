@@ -125,6 +125,19 @@ impl MuxEngine {
             registry.register(wrapper).await;
         }
 
+        // Register the task tool when a subagent event handler is set, so the
+        // LLM running this turn can dispatch subagents via the `task` tool and
+        // events stream back to the host. Without a handler the tool is
+        // silently absent: the host opts in by calling `set_subagent_event_handler`.
+        if self.subagent_event_handler.read().is_some() {
+            match self.try_build_ffi_task_tool().await {
+                Ok(task_tool) => registry.register(task_tool).await,
+                Err(e) => {
+                    eprintln!("Skipping task tool registration for this turn: {}", e)
+                }
+            }
+        }
+
         registry
     }
 
@@ -423,80 +436,113 @@ impl MuxEngine {
 
     /// Execute the TaskTool to spawn a subagent.
     /// This creates an FfiTaskTool with the current engine state and event handler.
-    // Unwired: the task/subagent tool is implemented and tested but not yet dispatched from the
-    // production chat loop. Retained until wired. See #9.
-    // (lock-across-await at the registry loops rides with this unwired method; see #9)
-    #[allow(dead_code)]
-    #[allow(clippy::await_holding_lock)]
+    /// Used directly by unit tests; the production chat loop reaches the same
+    /// implementation by registering the tool into `build_tool_registry`.
+    #[cfg(test)]
     pub(super) async fn execute_task_tool(
         &self,
         params: serde_json::Value,
     ) -> Result<mux::tool::ToolResult, String> {
-        // Check if handler is set (required for TaskTool)
         if self.subagent_event_handler.read().is_none() {
             return Ok(mux::tool::ToolResult::error(
                 "TaskTool not available: no subagent event handler registered",
             ));
         }
+        let tool = self.try_build_ffi_task_tool().await?;
+        tool.execute(params).await.map_err(|e| e.to_string())
+    }
 
-        // Get provider and validate Custom providers exist before proceeding
+    /// Build an `FfiTaskTool` from the engine's current state.
+    ///
+    /// Returns `Err` if a precondition can't be satisfied at build time
+    /// (no agent model resolvable, custom provider unregistered, primary
+    /// provider unconfigured). Callers gate on `subagent_event_handler`
+    /// being present; this helper does not re-check it.
+    ///
+    /// The constructed tool can be registered into the chat loop's tool
+    /// `Registry` so the LLM can dispatch subagents directly, or executed
+    /// once via `execute_task_tool` for unit testing.
+    pub(super) async fn try_build_ffi_task_tool(&self) -> Result<FfiTaskTool, String> {
         let provider = self.default_provider.read().clone();
-        if let Provider::Custom { ref name } = provider
-            && !self.callback_providers.read().contains_key(name)
-        {
-            return Err(format!(
-                "Custom LLM provider '{}' not registered. Call register_llm_provider first.",
-                name
-            ));
-        }
 
-        // Build AgentRegistry from registered agent configs
-        let agent_registry = AgentRegistry::new();
-        let provider_default_model = self.get_default_model(provider.clone());
-        {
-            let configs = self.agent_configs.read();
-            for (name, config) in configs.iter() {
-                let model = config
-                    .model
-                    .clone()
-                    .or_else(|| provider_default_model.clone())
+        // Capture the custom provider's client atomically with validation so a
+        // concurrent `unregister_llm_provider` between here and the factory's
+        // first call cannot turn a build-time Ok into a runtime panic. If the
+        // lookup fails we fail the build cleanly; the factory closure then
+        // operates on a guaranteed-Some `captured_custom_client`.
+        let captured_custom_client: Option<Arc<dyn LlmClient>> = match &provider {
+            Provider::Custom { name } => Some(
+                self.callback_providers
+                    .read()
+                    .get(name)
+                    .cloned()
+                    .map(|c| c as Arc<dyn LlmClient>)
                     .ok_or_else(|| {
                         format!(
-                            "No model configured for agent '{}'. Set model in AgentConfig or set default_model via set_provider_config",
+                            "Custom LLM provider '{}' not registered. Call register_llm_provider first.",
                             name
                         )
-                    })?;
+                    })?,
+            ),
+            _ => None,
+        };
 
-                let mut definition = AgentDefinition::new(name, &config.system_prompt)
-                    .model(&model)
-                    .max_iterations(config.max_iterations as usize);
+        // Snapshot agent configs before any `.await` so the registration
+        // loop doesn't hold the read guard across await points.
+        let agent_configs_snapshot: Vec<_> = self
+            .agent_configs
+            .read()
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
 
-                if !config.allowed_tools.is_empty() {
-                    definition = definition.allowed_tools(config.allowed_tools.clone());
-                }
-                if !config.denied_tools.is_empty() {
-                    definition = definition.denied_tools(config.denied_tools.clone());
-                }
+        let agent_registry = AgentRegistry::new();
+        let provider_default_model = self.get_default_model(provider.clone());
+        for (name, config) in agent_configs_snapshot {
+            let model = config
+                .model
+                .clone()
+                .or_else(|| provider_default_model.clone())
+                .ok_or_else(|| {
+                    format!(
+                        "No model configured for agent '{}'. Set model in AgentConfig or set default_model via set_provider_config",
+                        name
+                    )
+                })?;
 
-                agent_registry.register(definition).await;
+            let mut definition = AgentDefinition::new(&name, &config.system_prompt)
+                .model(&model)
+                .max_iterations(config.max_iterations as usize);
+
+            if !config.allowed_tools.is_empty() {
+                definition = definition.allowed_tools(config.allowed_tools.clone());
             }
+            if !config.denied_tools.is_empty() {
+                definition = definition.denied_tools(config.denied_tools.clone());
+            }
+
+            agent_registry.register(definition).await;
         }
 
-        // Build tool registry with builtin + custom tools
+        // Snapshot custom tools before any `.await`.
+        let custom_tools_snapshot: Vec<Arc<dyn Tool>> = self
+            .custom_tools
+            .read()
+            .values()
+            .map(|t| t.clone() as Arc<dyn Tool>)
+            .collect();
+
         let tool_registry = Registry::new();
         for tool in &self.builtin_tools {
             tool_registry.register_arc(tool.clone()).await;
         }
-        {
-            let custom_tools = self.custom_tools.read();
-            for tool in custom_tools.values() {
-                tool_registry
-                    .register_arc(tool.clone() as Arc<dyn Tool>)
-                    .await;
-            }
+        for tool in custom_tools_snapshot {
+            tool_registry.register_arc(tool).await;
         }
 
-        // For Custom providers, we don't need API key config (provider already read above)
+        // For Custom providers we don't need API key config — the captured
+        // callback client is enough. For everything else, fail fast if the
+        // provider isn't configured.
         let provider_config = match &provider {
             Provider::Custom { .. } => None,
             _ => Some(
@@ -508,32 +554,18 @@ impl MuxEngine {
             ),
         };
 
-        // Clone what we need for the client factory closure
         let provider_clone = provider.clone();
         let api_key = provider_config.as_ref().map(|c| c.api_key.clone());
         let base_url = provider_config.as_ref().and_then(|c| c.base_url.clone());
 
-        // For custom providers, capture the client Arc upfront to avoid race conditions
-        // (provider could be unregistered between validation and factory execution)
-        let captured_custom_client: Option<Arc<dyn LlmClient>> = match &provider {
-            Provider::Custom { name } => self
-                .callback_providers
-                .read()
-                .get(name)
-                .cloned()
-                .map(|c| c as Arc<dyn LlmClient>),
-            _ => None,
-        };
-
-        // Create client factory
         let client_factory = move |_model: &str| -> Arc<dyn LlmClient> {
             match &provider_clone {
                 Provider::Custom { .. } => captured_custom_client
                     .clone()
-                    // Safe: captured_custom_client is Some whenever provider is Custom (set
-                    // just above). The factory closure type is infallible by design, so
-                    // propagating an error would change FfiTaskTool's contract.
-                    .expect("Custom provider was captured at start of execute_task_tool"),
+                    // Invariant: when `provider` is `Custom`, the match above
+                    // populated `captured_custom_client` with `Some(_)` or
+                    // returned `Err` before reaching this point.
+                    .expect("invariant: custom provider validated and captured at build"),
                 Provider::Anthropic => {
                     Arc::new(AnthropicClient::new(api_key.as_deref().unwrap_or("")))
                 }
@@ -548,22 +580,21 @@ impl MuxEngine {
             }
         };
 
-        // Get the event handler - we need to clone it for FfiTaskTool
-        // Since Box<dyn SubagentEventHandler> isn't Clone, we need a workaround.
-        // For now, we'll create a simple proxy that forwards to the stored handler.
+        // Forward subagent events through a proxy that late-binds against
+        // the engine's currently-registered handler. The handler may be
+        // swapped via `set_subagent_event_handler` between build and use;
+        // the proxy reads it at event time.
         let handler_proxy = TaskToolEventProxy {
             engine_handler: self.subagent_event_handler.clone(),
         };
 
-        let task_tool = FfiTaskTool::new(
+        Ok(FfiTaskTool::new(
             agent_registry,
             tool_registry,
             client_factory,
             Box::new(handler_proxy),
         )
-        .with_transcript_store(self.transcript_store.clone());
-
-        task_tool.execute(params).await.map_err(|e| e.to_string())
+        .with_transcript_store(self.transcript_store.clone()))
     }
 }
 
