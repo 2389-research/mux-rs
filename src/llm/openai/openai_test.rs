@@ -236,3 +236,48 @@ fn test_response_malformed_tool_arguments_propagates_error() {
         message
     );
 }
+
+#[test]
+fn test_response_malformed_tool_arguments_truncates_long_payload() {
+    // Pathological / PII-laden response payloads must not be embedded
+    // verbatim in error messages. Verify large malformed input is truncated.
+    use crate::error::LlmError;
+    use crate::llm::Response;
+
+    let huge = "X".repeat(50_000); // not valid JSON, and 50KB long
+    let resp = OpenAIResponse {
+        id: "resp_huge".to_string(),
+        model: "gpt-4o".to_string(),
+        choices: vec![OpenAIChoice {
+            index: 0,
+            message: OpenAIResponseMessage {
+                role: "assistant".to_string(),
+                content: None,
+                tool_calls: Some(vec![OpenAIToolCall {
+                    id: "call_huge".to_string(),
+                    call_type: "function".to_string(),
+                    function: OpenAIFunctionCall {
+                        name: "noisy_tool".to_string(),
+                        arguments: huge.clone(),
+                    },
+                }]),
+            },
+            finish_reason: Some("tool_calls".to_string()),
+        }],
+        usage: None,
+    };
+
+    let err = Response::try_from(resp).expect_err("malformed payload must error");
+    let message = err.to_string();
+    assert!(matches!(err, LlmError::Configuration(_)));
+    assert!(
+        message.contains("truncated"),
+        "long malformed payload must be truncated; got: {}",
+        message
+    );
+    assert!(
+        message.len() < 1_000,
+        "error message must stay bounded; got {} bytes",
+        message.len()
+    );
+}
