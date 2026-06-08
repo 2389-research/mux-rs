@@ -67,21 +67,24 @@ fn try_openai_messages(messages: &[Message]) -> Result<Vec<OpenAIMessage>, LlmEr
             .iter()
             .any(|b| matches!(b, ContentBlock::Media { .. }));
 
-        let tool_calls: Vec<OpenAIToolCall> = msg
-            .content
-            .iter()
-            .filter_map(|b| match b {
-                ContentBlock::ToolUse { id, name, input } => Some(OpenAIToolCall {
+        let mut tool_calls: Vec<OpenAIToolCall> = Vec::new();
+        for block in &msg.content {
+            if let ContentBlock::ToolUse { id, name, input } = block {
+                tool_calls.push(OpenAIToolCall {
                     id: id.clone(),
                     call_type: "function".to_string(),
                     function: OpenAIFunctionCall {
                         name: name.clone(),
-                        arguments: serde_json::to_string(input).unwrap_or_default(),
+                        arguments: serde_json::to_string(input).map_err(|e| {
+                            LlmError::Configuration(format!(
+                                "failed to serialize tool '{}' input as JSON: {}",
+                                name, e
+                            ))
+                        })?,
                     },
-                }),
-                _ => None,
-            })
-            .collect();
+                });
+            }
+        }
 
         let content = if has_media {
             // Build parts array

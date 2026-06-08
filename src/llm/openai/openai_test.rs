@@ -198,3 +198,37 @@ fn test_openai_supports_media() {
     assert!(c.supports_media(MediaKind::Audio));
     assert!(!c.supports_media(MediaKind::Video));
 }
+
+#[test]
+fn test_response_malformed_tool_arguments_propagates_error() {
+    use crate::error::LlmError;
+    use crate::llm::Response;
+
+    let resp = OpenAIResponse {
+        id: "resp_123".to_string(),
+        model: "gpt-4o".to_string(),
+        choices: vec![OpenAIChoice {
+            index: 0,
+            message: OpenAIResponseMessage {
+                role: "assistant".to_string(),
+                content: None,
+                tool_calls: Some(vec![OpenAIToolCall {
+                    id: "call_1".to_string(),
+                    call_type: "function".to_string(),
+                    function: OpenAIFunctionCall {
+                        name: "get_weather".to_string(),
+                        arguments: "{not valid json".to_string(),
+                    },
+                }]),
+            },
+            finish_reason: Some("tool_calls".to_string()),
+        }],
+        usage: None,
+    };
+
+    let result = Response::try_from(resp);
+    let err = result.expect_err("malformed tool arguments must propagate as error");
+    let message = err.to_string();
+    assert!(matches!(err, LlmError::Configuration(_)));
+    assert!(message.contains("get_weather"), "error must reference tool name, got: {}", message);
+}

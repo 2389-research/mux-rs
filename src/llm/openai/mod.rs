@@ -102,7 +102,7 @@ impl super::client::LlmClient for OpenAIClient {
         }
 
         let openai_resp: OpenAIResponse = response.json().await?;
-        Ok(Response::from(openai_resp))
+        Response::try_from(openai_resp)
     }
 
     fn create_message_stream(
