@@ -74,10 +74,9 @@ pub struct MuxEngine {
     hook_handler: Arc<RwLock<Option<Box<dyn HookHandler>>>>,
     /// Custom tools registered from Swift
     custom_tools: Arc<RwLock<HashMap<String, Arc<FfiToolBridge>>>>,
-    /// Transcript storage for resume capability
-    // Unwired: the task/subagent tool is implemented and tested but not yet dispatched from the
-    // production chat loop. Retained until wired. See #9.
-    #[allow(dead_code)]
+    /// Transcript storage for resume capability. Plumbed into the FfiTaskTool
+    /// built by `try_build_ffi_task_tool` so a subagent's transcript can be
+    /// captured for later resume.
     transcript_store: Arc<MemoryTranscriptStore>,
     /// Default provider for new workspaces
     default_provider: Arc<RwLock<Provider>>,

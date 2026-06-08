@@ -1013,3 +1013,123 @@ fn test_do_send_message_media_reaches_real_llm_provider() {
 
     engine.delete_workspace(ws.id).unwrap();
 }
+
+// =============================================================================
+// build_tool_registry — task tool wiring regression (#9)
+// =============================================================================
+//
+// These tests pin the wiring change that closes #9: the production chat loop's
+// tool registry must include the `task` tool when (and only when) a subagent
+// event handler is registered. Together with the existing
+// `test_execute_task_tool_*` and the FfiTaskTool unit tests, they cover the
+// full path from "host registers handler" to "LLM sees `task` in its
+// inventory".
+
+fn build_tool_registry_for_test(engine: &Arc<MuxEngine>) -> Registry {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        engine
+            .build_tool_registry(&None, &std::collections::HashMap::new())
+            .await
+    })
+}
+
+fn assert_builtins_present(names: &[String]) {
+    for expected in ["read_file", "write_file", "list_files", "search", "bash"] {
+        assert!(
+            names.iter().any(|n| n == expected),
+            "expected builtin '{}' in registry; got {:?}",
+            expected,
+            names
+        );
+    }
+}
+
+#[test]
+fn test_build_tool_registry_omits_task_when_no_handler() {
+    let engine = create_test_engine();
+    // Make sure no leftover handler from a previous test pollutes state.
+    engine.clear_subagent_event_handler();
+    engine.set_api_key(Provider::Anthropic, "sk-test".to_string());
+
+    let registry = build_tool_registry_for_test(&engine);
+    let names = tokio::runtime::Runtime::new()
+        .unwrap()
+        .block_on(registry.list());
+
+    assert_builtins_present(&names);
+    assert!(
+        !names.iter().any(|n| n == "task"),
+        "task tool must NOT be registered without a handler; got {:?}",
+        names
+    );
+}
+
+#[test]
+fn test_build_tool_registry_includes_task_when_handler_set() {
+    let engine = create_test_engine();
+    engine.set_api_key(Provider::Anthropic, "sk-test".to_string());
+
+    struct CountingHandler;
+    impl SubagentEventHandler for CountingHandler {
+        fn on_agent_started(&self, _: String, _: String, _: String, _: String) {}
+        fn on_tool_use(&self, _: String, _: String, _: String) {}
+        fn on_tool_result(&self, _: String, _: String, _: String, _: bool) {}
+        fn on_iteration(&self, _: String, _: u32) {}
+        fn on_agent_completed(&self, _: String, _: String, _: u32, _: u32, _: bool) {}
+        fn on_agent_error(&self, _: String, _: String) {}
+        fn on_stream_delta(&self, _: String, _: String) {}
+        fn on_stream_usage(&self, _: String, _: u32, _: u32) {}
+    }
+    engine.set_subagent_event_handler(Box::new(CountingHandler));
+
+    let registry = build_tool_registry_for_test(&engine);
+    let names = tokio::runtime::Runtime::new()
+        .unwrap()
+        .block_on(registry.list());
+
+    assert_builtins_present(&names);
+    assert!(
+        names.iter().any(|n| n == "task"),
+        "task tool must be registered when a handler is set; got {:?}",
+        names
+    );
+
+    engine.clear_subagent_event_handler();
+}
+
+#[test]
+fn test_build_tool_registry_drops_task_after_handler_cleared() {
+    // Idempotency check: registering then clearing the handler reverts the
+    // tool inventory. Each `send_message` turn rebuilds the registry, so a
+    // host that calls `clear_subagent_event_handler` mid-conversation gets
+    // a turn without `task` immediately afterward.
+    let engine = create_test_engine();
+    engine.set_api_key(Provider::Anthropic, "sk-test".to_string());
+
+    struct H;
+    impl SubagentEventHandler for H {
+        fn on_agent_started(&self, _: String, _: String, _: String, _: String) {}
+        fn on_tool_use(&self, _: String, _: String, _: String) {}
+        fn on_tool_result(&self, _: String, _: String, _: String, _: bool) {}
+        fn on_iteration(&self, _: String, _: u32) {}
+        fn on_agent_completed(&self, _: String, _: String, _: u32, _: u32, _: bool) {}
+        fn on_agent_error(&self, _: String, _: String) {}
+        fn on_stream_delta(&self, _: String, _: String) {}
+        fn on_stream_usage(&self, _: String, _: u32, _: u32) {}
+    }
+    engine.set_subagent_event_handler(Box::new(H));
+
+    // First build: handler is set, task is present.
+    let names_before = tokio::runtime::Runtime::new()
+        .unwrap()
+        .block_on(build_tool_registry_for_test(&engine).list());
+    assert!(names_before.iter().any(|n| n == "task"));
+
+    // Clear and rebuild: task is gone.
+    engine.clear_subagent_event_handler();
+    let names_after = tokio::runtime::Runtime::new()
+        .unwrap()
+        .block_on(build_tool_registry_for_test(&engine).list());
+    assert!(!names_after.iter().any(|n| n == "task"));
+}
