@@ -238,15 +238,18 @@ fn test_response_malformed_tool_arguments_propagates_error() {
 }
 
 #[test]
-fn test_response_malformed_tool_arguments_truncates_long_payload() {
-    // Pathological / PII-laden response payloads must not be embedded
-    // verbatim in error messages. Verify large malformed input is truncated.
+fn test_response_malformed_tool_arguments_omits_raw_payload() {
+    // Tool arguments may contain user-derived content from the model. The
+    // error message must NOT embed the raw payload — only a byte count and
+    // the serde parse position. Verify with a payload built from a marker
+    // string that would be conspicuous if leaked.
     use crate::error::LlmError;
     use crate::llm::Response;
 
-    let huge = "X".repeat(50_000); // not valid JSON, and 50KB long
+    const MARKER: &str = "SENSITIVE_USER_INPUT_THAT_MUST_NOT_LEAK";
+    let payload = format!("{{\"q\": \"{}\"", MARKER); // unterminated JSON
     let resp = OpenAIResponse {
-        id: "resp_huge".to_string(),
+        id: "resp_marker".to_string(),
         model: "gpt-4o".to_string(),
         choices: vec![OpenAIChoice {
             index: 0,
@@ -254,11 +257,11 @@ fn test_response_malformed_tool_arguments_truncates_long_payload() {
                 role: "assistant".to_string(),
                 content: None,
                 tool_calls: Some(vec![OpenAIToolCall {
-                    id: "call_huge".to_string(),
+                    id: "call_marker".to_string(),
                     call_type: "function".to_string(),
                     function: OpenAIFunctionCall {
                         name: "noisy_tool".to_string(),
-                        arguments: huge.clone(),
+                        arguments: payload.clone(),
                     },
                 }]),
             },
@@ -271,13 +274,13 @@ fn test_response_malformed_tool_arguments_truncates_long_payload() {
     let message = err.to_string();
     assert!(matches!(err, LlmError::Configuration(_)));
     assert!(
-        message.contains("truncated"),
-        "long malformed payload must be truncated; got: {}",
+        !message.contains(MARKER),
+        "raw payload content must not appear in error message; got: {}",
         message
     );
     assert!(
-        message.len() < 1_000,
-        "error message must stay bounded; got {} bytes",
-        message.len()
+        message.contains("bytes"),
+        "error must report the payload byte count; got: {}",
+        message
     );
 }
