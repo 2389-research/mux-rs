@@ -221,9 +221,8 @@ impl AnthropicClient {
 
     /// Create a new Anthropic client from the ANTHROPIC_API_KEY environment variable.
     pub fn from_env() -> Result<Self, LlmError> {
-        let api_key = std::env::var("ANTHROPIC_API_KEY").map_err(|_| LlmError::Api {
-            status: 0,
-            message: "ANTHROPIC_API_KEY environment variable not set".to_string(),
+        let api_key = std::env::var("ANTHROPIC_API_KEY").map_err(|_| {
+            LlmError::Configuration("ANTHROPIC_API_KEY environment variable not set".to_string())
         })?;
         Ok(Self::new(api_key))
     }

@@ -38,9 +38,8 @@ impl OpenAIClient {
 
     /// Create a new OpenAI client from the OPENAI_API_KEY environment variable.
     pub fn from_env() -> Result<Self, LlmError> {
-        let api_key = std::env::var("OPENAI_API_KEY").map_err(|_| LlmError::Api {
-            status: 0,
-            message: "OPENAI_API_KEY environment variable not set".to_string(),
+        let api_key = std::env::var("OPENAI_API_KEY").map_err(|_| {
+            LlmError::Configuration("OPENAI_API_KEY environment variable not set".to_string())
         })?;
         Ok(Self::new(api_key))
     }
@@ -58,9 +57,8 @@ impl OpenAIClient {
 
     /// Create an OpenRouter client from the OPENROUTER_API_KEY environment variable.
     pub fn openrouter_from_env() -> Result<Self, LlmError> {
-        let api_key = std::env::var("OPENROUTER_API_KEY").map_err(|_| LlmError::Api {
-            status: 0,
-            message: "OPENROUTER_API_KEY environment variable not set".to_string(),
+        let api_key = std::env::var("OPENROUTER_API_KEY").map_err(|_| {
+            LlmError::Configuration("OPENROUTER_API_KEY environment variable not set".to_string())
         })?;
         Ok(Self::openrouter(api_key))
     }
