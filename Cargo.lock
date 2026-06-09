@@ -815,7 +815,7 @@ dependencies = [
 
 [[package]]
 name = "mux"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -837,7 +837,7 @@ dependencies = [
 
 [[package]]
 name = "mux-ffi"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "anyhow",
  "async-trait",
