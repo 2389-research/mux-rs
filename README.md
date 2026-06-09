@@ -6,7 +6,7 @@ Agentic infrastructure for Rust. Tool execution, MCP integration, permission-gat
 
 ```toml
 [dependencies]
-mux = "0.13"
+mux = "0.14"
 ```
 
 ## Features
