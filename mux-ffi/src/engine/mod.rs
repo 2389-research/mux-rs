@@ -114,7 +114,7 @@ impl MuxEngine {
             Arc::new(ReadFileTool::new()),
             Arc::new(WriteFileTool::new()),
             Arc::new(ListFilesTool),
-            Arc::new(SearchTool),
+            Arc::new(SearchTool::new()),
             Arc::new(BashTool),
         ];
 

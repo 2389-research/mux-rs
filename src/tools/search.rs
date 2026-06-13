@@ -5,10 +5,26 @@ use async_trait::async_trait;
 use regex::Regex;
 use serde::Deserialize;
 
+use crate::confine::RootedFs;
 use crate::tool::{Tool, ToolResult};
 
 /// Tool for searching file contents with regex patterns.
-pub struct SearchTool;
+#[derive(Default)]
+pub struct SearchTool {
+    root: Option<RootedFs>,
+}
+
+impl SearchTool {
+    /// Create an unconfined search tool (current behavior).
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Create a search tool confined to `root`.
+    pub fn rooted(root: RootedFs) -> Self {
+        Self { root: Some(root) }
+    }
+}
 
 #[async_trait]
 impl Tool for SearchTool {
@@ -51,6 +67,13 @@ impl Tool for SearchTool {
         let params: Params = serde_json::from_value(params)?;
 
         let base_path = params.path.unwrap_or_else(|| ".".to_string());
+        let base_path = match &self.root {
+            Some(jail) => match jail.resolve(&base_path) {
+                Ok(p) => p.to_string_lossy().into_owned(),
+                Err(e) => return Ok(ToolResult::error(e.to_string())),
+            },
+            None => base_path,
+        };
         let glob_pattern = params.glob.unwrap_or_else(|| "**/*".to_string());
         let full_pattern = format!("{}/{}", base_path, glob_pattern);
 
@@ -60,9 +83,17 @@ impl Tool for SearchTool {
             Err(e) => return Ok(ToolResult::error(format!("Invalid regex: {}", e))),
         };
 
-        for entry in glob::glob(&full_pattern).unwrap_or_else(|_| glob::glob("").unwrap()) {
-            if let Ok(path) = entry
-                && path.is_file()
+        for path in glob::glob(&full_pattern)
+            .unwrap_or_else(|_| glob::glob("").unwrap())
+            .flatten()
+        {
+            // A glob can expand through a symlink to outside the root; drop those.
+            if let Some(jail) = &self.root
+                && jail.resolve(&path).is_err()
+            {
+                continue;
+            }
+            if path.is_file()
                 && let Ok(content) = std::fs::read_to_string(&path)
             {
                 for (line_num, line) in content.lines().enumerate() {
@@ -105,7 +136,7 @@ mod tests {
         writeln!(file, "Goodbye, world!").unwrap();
         writeln!(file, "Hello again!").unwrap();
 
-        let tool = SearchTool;
+        let tool = SearchTool::new();
         let result = tool
             .execute(serde_json::json!({
                 "pattern": "Hello",
@@ -124,7 +155,7 @@ mod tests {
         let path = dir.path().join("test.txt");
         std::fs::write(&path, "Hello, world!").unwrap();
 
-        let tool = SearchTool;
+        let tool = SearchTool::new();
         let result = tool
             .execute(serde_json::json!({
                 "pattern": "foobar",
@@ -139,7 +170,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_search_invalid_regex() {
-        let tool = SearchTool;
+        let tool = SearchTool::new();
         let result = tool
             .execute(serde_json::json!({
                 "pattern": "[invalid"
@@ -149,5 +180,41 @@ mod tests {
 
         assert!(result.is_error);
         assert!(result.content.contains("Invalid regex"));
+    }
+
+    #[tokio::test]
+    async fn test_search_rooted_excludes_outside_matches() {
+        use crate::confine::RootedFs;
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("inside.txt"), "FINDME inside").unwrap();
+        let outside = TempDir::new().unwrap();
+        std::fs::write(outside.path().join("secret.txt"), "FINDME OUTSIDE_SECRET").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(outside.path(), dir.path().join("link")).unwrap();
+
+        let jail = RootedFs::new(dir.path()).unwrap();
+        let tool = SearchTool::rooted(jail);
+
+        let result = tool
+            .execute(serde_json::json!({ "pattern": "FINDME" }))
+            .await
+            .unwrap();
+        assert!(!result.is_error, "Error: {}", result.content);
+        assert!(result.content.contains("inside"));
+        // A symlink-escaped hit must not leak content from outside the root.
+        assert!(!result.content.contains("OUTSIDE_SECRET"));
+    }
+
+    #[tokio::test]
+    async fn test_search_rooted_blocks_outside_base_path() {
+        use crate::confine::RootedFs;
+        let dir = TempDir::new().unwrap();
+        let jail = RootedFs::new(dir.path()).unwrap();
+        let tool = SearchTool::rooted(jail);
+        let result = tool
+            .execute(serde_json::json!({ "pattern": "x", "path": "/etc" }))
+            .await
+            .unwrap();
+        assert!(result.is_error);
     }
 }

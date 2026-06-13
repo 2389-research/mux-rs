@@ -219,7 +219,7 @@ async fn main() -> Result<()> {
     let registry = Registry::new();
     registry.register(ReadFileTool::new()).await;
     registry.register(WriteFileTool::new()).await;
-    registry.register(SearchTool).await;
+    registry.register(SearchTool::new()).await;
     registry.register(ListFilesTool).await;
     registry.register(BashTool).await;
 
