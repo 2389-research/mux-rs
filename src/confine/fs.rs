@@ -76,4 +76,29 @@ impl RootedFs {
         }
         Ok(resolved)
     }
+
+    /// Open a file for reading, re-verifying containment at open time. This closes
+    /// the resolve→open window against a symlink swapped in after `resolve`. Note
+    /// the residual race against an attacker actively swapping a component between
+    /// open and the post-open canonicalize is best-effort; fully closing it needs
+    /// platform-specific `openat2(RESOLVE_BENEATH)`, which is out of scope.
+    pub fn open_read(
+        &self,
+        candidate: impl AsRef<Path>,
+    ) -> Result<std::fs::File, ConfinementError> {
+        let safe = self.resolve(candidate)?;
+        let file = std::fs::File::open(&safe)?;
+        // Re-verify: the file now exists, so canonicalize resolves any leaf symlink
+        // planted between resolve() and open(). This guards the post-resolve race;
+        // resolve() already rejects a symlink that exists at resolve time, so this
+        // branch is only reachable under a real TOCTOU race (not single-threaded tests).
+        let real = safe.canonicalize()?;
+        if !real.starts_with(&self.root) {
+            return Err(ConfinementError::EscapesRoot {
+                candidate: safe,
+                root: self.root.clone(),
+            });
+        }
+        Ok(file)
+    }
 }

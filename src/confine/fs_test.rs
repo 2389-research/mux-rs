@@ -110,3 +110,43 @@ fn resolve_nonexisting_leaf_with_outside_ancestor_escapes() {
     let err = jail.resolve("link/new_file.txt").unwrap_err();
     assert!(matches!(err, ConfinementError::EscapesRoot { .. }));
 }
+
+#[test]
+fn open_read_reads_in_root_file() {
+    use std::io::Read;
+    let dir = TempDir::new().unwrap();
+    let jail = RootedFs::new(dir.path()).unwrap();
+    std::fs::write(jail.root().join("hello.txt"), "hi there").unwrap();
+    let mut file = jail.open_read("hello.txt").unwrap();
+    let mut contents = String::new();
+    file.read_to_string(&mut contents).unwrap();
+    assert_eq!(contents, "hi there");
+}
+
+#[cfg(unix)]
+#[test]
+fn open_read_rejects_symlink_escape() {
+    let dir = TempDir::new().unwrap();
+    let jail = RootedFs::new(dir.path()).unwrap();
+    let outside = TempDir::new().unwrap();
+    std::fs::write(outside.path().join("secret.txt"), "secret").unwrap();
+    std::os::unix::fs::symlink(
+        outside.path().join("secret.txt"),
+        jail.root().join("escape.txt"),
+    )
+    .unwrap();
+    // The escaping symlink exists at resolve time, so resolve() rejects it before
+    // open(); the post-open re-check covers the post-resolve race (see open_read).
+    let err = jail.open_read("escape.txt").unwrap_err();
+    assert!(matches!(err, ConfinementError::EscapesRoot { .. }));
+}
+
+#[test]
+fn open_read_reports_io_error_for_missing_file() {
+    let dir = TempDir::new().unwrap();
+    let jail = RootedFs::new(dir.path()).unwrap();
+    // Resolves inside the root, but the file does not exist: surfaces as an Io error
+    // from File::open, exercising open_read's `?` propagation on the open call.
+    let err = jail.open_read("not_here.txt").unwrap_err();
+    assert!(matches!(err, ConfinementError::Io(_)));
+}
