@@ -21,6 +21,7 @@ use crate::types::{
     AgentConfig, ApprovalDecision, Conversation, Provider, TranscriptData, Workspace,
 };
 use mux::agent::MemoryTranscriptStore;
+use mux::confine::RootedFs;
 #[cfg(test)]
 use mux::prelude::{ContentBlock, Role};
 use mux::tool::Tool;
@@ -92,51 +93,19 @@ pub struct MuxEngine {
 impl MuxEngine {
     #[uniffi::constructor]
     pub fn new(data_dir: String) -> Result<Arc<Self>, MuxFfiError> {
-        let path = PathBuf::from(&data_dir);
+        Self::build(data_dir, None)
+    }
 
-        fs::create_dir_all(&path).map_err(|e| MuxFfiError::Engine {
-            message: format!("Failed to create data directory: {}", e),
+    /// Build an engine whose built-in filesystem tools are confined to `root`.
+    /// Additive and non-breaking: `new` is unchanged. `bash` is still registered
+    /// — a confined filesystem jail is moot unless the deployment also drops or
+    /// OS-sandboxes `bash` (see docs/confining-mux.md).
+    #[uniffi::constructor]
+    pub fn new_confined(data_dir: String, root: String) -> Result<Arc<Self>, MuxFfiError> {
+        let jail = RootedFs::new(&root).map_err(|e| MuxFfiError::Engine {
+            message: format!("Invalid confinement root '{}': {}", root, e),
         })?;
-
-        // Create messages directory if it doesn't exist
-        let messages_dir = path.join(MESSAGES_DIR);
-        fs::create_dir_all(&messages_dir).map_err(|e| MuxFfiError::Engine {
-            message: format!("Failed to create messages directory: {}", e),
-        })?;
-
-        // Load existing data from disk
-        let workspaces = Self::load_workspaces(&path);
-        let conversations = Self::load_conversations(&path);
-        let message_history = Self::load_all_messages(&path, &conversations);
-
-        // Initialize built-in tools
-        let builtin_tools: Vec<Arc<dyn Tool>> = vec![
-            Arc::new(ReadFileTool::new()),
-            Arc::new(WriteFileTool::new()),
-            Arc::new(ListFilesTool::new()),
-            Arc::new(SearchTool::new()),
-            Arc::new(BashTool),
-        ];
-
-        Ok(Arc::new(Self {
-            data_dir: path,
-            workspaces: Arc::new(RwLock::new(workspaces)),
-            conversations: Arc::new(RwLock::new(conversations)),
-            message_history: Arc::new(RwLock::new(message_history)),
-            api_keys: Arc::new(RwLock::new(HashMap::new())),
-            mcp_clients: Arc::new(RwLock::new(HashMap::new())),
-            workspace_lifecycle: Arc::new(RwLock::new(HashMap::new())),
-            pending_approvals: Arc::new(RwLock::new(HashMap::new())),
-            builtin_tools,
-            agent_configs: Arc::new(RwLock::new(HashMap::new())),
-            hook_handler: Arc::new(RwLock::new(None)),
-            custom_tools: Arc::new(RwLock::new(HashMap::new())),
-            transcript_store: MemoryTranscriptStore::shared(),
-            default_provider: Arc::new(RwLock::new(Provider::Anthropic)),
-            subagent_event_handler: Arc::new(RwLock::new(None)),
-            callback_providers: Arc::new(RwLock::new(HashMap::new())),
-            model_context_configs: Arc::new(RwLock::new(HashMap::new())),
-        }))
+        Self::build(data_dir, Some(jail))
     }
 
     pub fn set_api_key(&self, provider: Provider, key: String) {
@@ -372,6 +341,68 @@ impl MuxEngine {
     }
 }
 
+impl MuxEngine {
+    /// Shared constructor body for `new` / `new_confined`. When `root` is set, the
+    /// filesystem built-ins are confined to it; `bash` is always registered.
+    fn build(data_dir: String, root: Option<RootedFs>) -> Result<Arc<Self>, MuxFfiError> {
+        let path = PathBuf::from(&data_dir);
+
+        fs::create_dir_all(&path).map_err(|e| MuxFfiError::Engine {
+            message: format!("Failed to create data directory: {}", e),
+        })?;
+
+        // Create messages directory if it doesn't exist
+        let messages_dir = path.join(MESSAGES_DIR);
+        fs::create_dir_all(&messages_dir).map_err(|e| MuxFfiError::Engine {
+            message: format!("Failed to create messages directory: {}", e),
+        })?;
+
+        // Load existing data from disk
+        let workspaces = Self::load_workspaces(&path);
+        let conversations = Self::load_conversations(&path);
+        let message_history = Self::load_all_messages(&path, &conversations);
+
+        // Initialize built-in tools. When confined, the filesystem tools are
+        // rooted; bash is always added (its presence defeats the jail — see docs).
+        let builtin_tools: Vec<Arc<dyn Tool>> = match &root {
+            Some(jail) => vec![
+                Arc::new(ReadFileTool::rooted(jail.clone())),
+                Arc::new(WriteFileTool::rooted(jail.clone())),
+                Arc::new(ListFilesTool::rooted(jail.clone())),
+                Arc::new(SearchTool::rooted(jail.clone())),
+                Arc::new(BashTool),
+            ],
+            None => vec![
+                Arc::new(ReadFileTool::new()),
+                Arc::new(WriteFileTool::new()),
+                Arc::new(ListFilesTool::new()),
+                Arc::new(SearchTool::new()),
+                Arc::new(BashTool),
+            ],
+        };
+
+        Ok(Arc::new(Self {
+            data_dir: path,
+            workspaces: Arc::new(RwLock::new(workspaces)),
+            conversations: Arc::new(RwLock::new(conversations)),
+            message_history: Arc::new(RwLock::new(message_history)),
+            api_keys: Arc::new(RwLock::new(HashMap::new())),
+            mcp_clients: Arc::new(RwLock::new(HashMap::new())),
+            workspace_lifecycle: Arc::new(RwLock::new(HashMap::new())),
+            pending_approvals: Arc::new(RwLock::new(HashMap::new())),
+            builtin_tools,
+            agent_configs: Arc::new(RwLock::new(HashMap::new())),
+            hook_handler: Arc::new(RwLock::new(None)),
+            custom_tools: Arc::new(RwLock::new(HashMap::new())),
+            transcript_store: MemoryTranscriptStore::shared(),
+            default_provider: Arc::new(RwLock::new(Provider::Anthropic)),
+            subagent_event_handler: Arc::new(RwLock::new(None)),
+            callback_providers: Arc::new(RwLock::new(HashMap::new())),
+            model_context_configs: Arc::new(RwLock::new(HashMap::new())),
+        }))
+    }
+}
+
 /// Test helper methods - only available in test builds
 #[cfg(test)]
 impl MuxEngine {
@@ -404,5 +435,48 @@ impl MuxEngine {
                 api_key_ref: None,
             });
         }
+    }
+}
+
+#[cfg(test)]
+mod confine_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn new_confined_read_file_refuses_outside_root() {
+        let data = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let engine = MuxEngine::new_confined(
+            data.path().to_string_lossy().to_string(),
+            root.path().to_string_lossy().to_string(),
+        )
+        .unwrap();
+
+        let read = engine
+            .builtin_tools
+            .iter()
+            .find(|t| t.name() == "read_file")
+            .expect("read_file builtin present");
+
+        let result = read
+            .execute(serde_json::json!({ "path": "/etc/passwd" }))
+            .await
+            .unwrap();
+        assert!(result.is_error);
+        assert!(
+            result.content.contains("escapes") || result.content.contains("confinement"),
+            "error should be a confinement rejection, got: {}",
+            result.content
+        );
+    }
+
+    #[tokio::test]
+    async fn new_confined_rejects_missing_root() {
+        let data = tempfile::tempdir().unwrap();
+        let err = MuxEngine::new_confined(
+            data.path().to_string_lossy().to_string(),
+            "/no/such/confinement/root".to_string(),
+        );
+        assert!(err.is_err());
     }
 }
