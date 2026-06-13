@@ -4,11 +4,16 @@
 use async_trait::async_trait;
 use serde::Deserialize;
 
+use crate::confine::{ConfinementError, UrlPolicy};
 use crate::tool::{Tool, ToolResult};
 
 /// Tool for fetching web content from URLs.
 pub struct WebFetchTool {
     client: reqwest::Client,
+    /// When set, every request (and every redirect hop) is checked against this
+    /// policy and redirects are followed manually. When `None`, redirects are
+    /// followed automatically by reqwest with no SSRF check (current behavior).
+    policy: Option<UrlPolicy>,
 }
 
 impl Default for WebFetchTool {
@@ -18,7 +23,7 @@ impl Default for WebFetchTool {
 }
 
 impl WebFetchTool {
-    /// Create a new WebFetchTool with default settings.
+    /// Create a new WebFetchTool with default settings (unconfined, auto-redirect).
     pub fn new() -> Self {
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(30))
@@ -27,12 +32,86 @@ impl WebFetchTool {
             // Safe: reqwest client construction only fails on catastrophic TLS-backend
             // init. Returning Result here would change the public `new()` signature.
             .expect("Failed to create HTTP client");
-        Self { client }
+        Self {
+            client,
+            policy: None,
+        }
     }
 
-    /// Create with a custom reqwest client.
+    /// Create with a custom reqwest client (unconfined).
     pub fn with_client(client: reqwest::Client) -> Self {
-        Self { client }
+        Self {
+            client,
+            policy: None,
+        }
+    }
+
+    /// Create a guarded fetcher that refuses private/internal addresses
+    /// (`UrlPolicy::public_only`) and re-validates every redirect hop.
+    pub fn guarded() -> Self {
+        Self::with_url_policy(UrlPolicy::public_only())
+    }
+
+    /// Create a guarded fetcher with a caller-supplied URL policy. Redirects are
+    /// followed manually so each hop's resolved IPs can be re-checked.
+    pub fn with_url_policy(policy: UrlPolicy) -> Self {
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .user_agent("mux-rs/0.2.0")
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .expect("Failed to create HTTP client");
+        Self {
+            client,
+            policy: Some(policy),
+        }
+    }
+
+    /// Follow redirects manually, re-validating every hop's host against the
+    /// policy before connecting. Returns the final non-redirect response, or an
+    /// error message suitable for `ToolResult::error`.
+    async fn fetch_guarded(
+        &self,
+        url: &str,
+        policy: &UrlPolicy,
+    ) -> Result<reqwest::Response, String> {
+        let mut current = reqwest::Url::parse(url)
+            .map_err(|e| ConfinementError::InvalidUrl(e.to_string()).to_string())?;
+        for _hop in 0..10 {
+            match current.scheme() {
+                "http" | "https" => {}
+                other => {
+                    return Err(ConfinementError::UnsupportedScheme(other.to_string()).to_string());
+                }
+            }
+            let host = current
+                .host_str()
+                .ok_or_else(|| "URL has no host".to_string())?;
+            if let Err(e) = policy.check_host(host).await {
+                return Err(e.to_string());
+            }
+            let resp = self
+                .client
+                .get(current.clone())
+                .send()
+                .await
+                .map_err(|e| format!("Failed to fetch URL: {}", e))?;
+            // Only follow real redirects that carry a Location header. 304 and 305
+            // fall in the 3xx range but are not redirects to a new resource.
+            if matches!(resp.status().as_u16(), 301 | 302 | 303 | 307 | 308) {
+                let location = resp
+                    .headers()
+                    .get(reqwest::header::LOCATION)
+                    .and_then(|v| v.to_str().ok())
+                    .ok_or_else(|| "Redirect response had no usable Location header".to_string())?;
+                current = current
+                    .join(location)
+                    .map_err(|e| format!("Invalid redirect URL: {}", e))?;
+                continue;
+            }
+            return Ok(resp);
+        }
+        Err("Too many redirects (max 10 hops)".to_string())
     }
 
     /// Simple HTML to text conversion - strips tags and decodes entities.
@@ -176,10 +255,17 @@ impl Tool for WebFetchTool {
             params.url
         };
 
-        // Fetch content
-        let response = match self.client.get(&url).send().await {
-            Ok(resp) => resp,
-            Err(e) => return Ok(ToolResult::error(format!("Failed to fetch URL: {}", e))),
+        // Fetch content. Guarded mode follows redirects manually and re-validates
+        // every hop's resolved IPs; unguarded mode keeps reqwest's auto-redirect.
+        let response = match &self.policy {
+            Some(policy) => match self.fetch_guarded(&url, policy).await {
+                Ok(resp) => resp,
+                Err(msg) => return Ok(ToolResult::error(msg)),
+            },
+            None => match self.client.get(&url).send().await {
+                Ok(resp) => resp,
+                Err(e) => return Ok(ToolResult::error(format!("Failed to fetch URL: {}", e))),
+            },
         };
 
         // Check status

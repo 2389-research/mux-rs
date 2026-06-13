@@ -1,7 +1,9 @@
-// ABOUTME: Tests for the SSRF deny-list (is_globally_routable truth table).
-// ABOUTME: All assertions use parsed IpAddr values; no I/O or network calls.
+// ABOUTME: Tests for the SSRF guard - the is_globally_routable deny-list truth table,
+// ABOUTME: UrlPolicy host checks, and guarded web_fetch over real loopback sockets.
 
 use crate::confine::{ConfinementError, UrlPolicy, is_globally_routable};
+use crate::tool::Tool;
+use crate::tools::WebFetchTool;
 use std::net::IpAddr;
 
 fn ip(s: &str) -> IpAddr {
@@ -75,4 +77,73 @@ async fn custom_policy_predicate_is_honored() {
     assert!(
         matches!(err, ConfinementError::BlockedAddress { ip: blocked, .. } if blocked == ip("10.0.0.1"))
     );
+}
+
+/// Spawn a one-shot HTTP/1.1 server on 127.0.0.1 that writes `response` to the
+/// first connection, then returns the bound port. Real socket, no mock.
+fn spawn_http_once(response: &'static str) -> u16 {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        if let Ok((mut stream, _)) = listener.accept() {
+            let mut buf = [0u8; 1024];
+            let _ = stream.read(&mut buf); // drain the request line/headers
+            let _ = stream.write_all(response.as_bytes());
+            let _ = stream.flush();
+        }
+    });
+    port
+}
+
+#[tokio::test]
+async fn guarded_fetch_blocks_loopback_literal() {
+    let tool = WebFetchTool::guarded();
+    let result = tool
+        .execute(serde_json::json!({ "url": "http://127.0.0.1:9/" }))
+        .await
+        .unwrap();
+    assert!(result.is_error);
+    assert!(result.content.contains("blocked"));
+}
+
+#[tokio::test]
+async fn guarded_fetch_blocks_private_redirect_hop() {
+    use std::net::{IpAddr, Ipv4Addr};
+    // Server responds with a redirect to a private address.
+    let port = spawn_http_once(
+        "HTTP/1.1 302 Found\r\nLocation: http://10.0.0.1/\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+    );
+    // Allow loopback so the first hop reaches the test server, but deny 10.0.0.1.
+    let policy = UrlPolicy::custom(|ip| ip != IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
+    let tool = WebFetchTool::with_url_policy(policy);
+    let result = tool
+        .execute(serde_json::json!({ "url": format!("http://127.0.0.1:{}/", port) }))
+        .await
+        .unwrap();
+    assert!(result.is_error);
+    // The error must be a policy block on the redirect target, not merely a
+    // connection error that happens to mention the address (which would pass
+    // even if per-hop re-validation were removed).
+    assert!(
+        result.content.contains("blocked by policy"),
+        "expected a policy block, got: {}",
+        result.content
+    );
+    assert!(result.content.contains("10.0.0.1"));
+}
+
+#[tokio::test]
+async fn unguarded_fetch_still_works() {
+    let port = spawn_http_once(
+        "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 11\r\nConnection: close\r\n\r\nhello there",
+    );
+    let tool = WebFetchTool::new();
+    let result = tool
+        .execute(serde_json::json!({ "url": format!("http://127.0.0.1:{}/", port) }))
+        .await
+        .unwrap();
+    assert!(!result.is_error, "Error: {}", result.content);
+    assert!(result.content.contains("hello there"));
 }
