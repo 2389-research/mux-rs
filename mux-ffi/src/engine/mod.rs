@@ -111,7 +111,7 @@ impl MuxEngine {
 
         // Initialize built-in tools
         let builtin_tools: Vec<Arc<dyn Tool>> = vec![
-            Arc::new(ReadFileTool),
+            Arc::new(ReadFileTool::new()),
             Arc::new(WriteFileTool),
             Arc::new(ListFilesTool),
             Arc::new(SearchTool),

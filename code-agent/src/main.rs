@@ -217,7 +217,7 @@ async fn main() -> Result<()> {
 
     // Create registry with built-in tools from mux library
     let registry = Registry::new();
-    registry.register(ReadFileTool).await;
+    registry.register(ReadFileTool::new()).await;
     registry.register(WriteFileTool).await;
     registry.register(SearchTool).await;
     registry.register(ListFilesTool).await;
