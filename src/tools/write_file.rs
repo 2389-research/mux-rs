@@ -1,15 +1,31 @@
 // ABOUTME: WriteFileTool - writes content to a file.
 // ABOUTME: Creates parent directories if needed, overwrites existing files.
 
-use std::path::Path;
+use std::path::PathBuf;
 
 use async_trait::async_trait;
 use serde::Deserialize;
 
+use crate::confine::RootedFs;
 use crate::tool::{Tool, ToolResult};
 
 /// Tool for writing content to files.
-pub struct WriteFileTool;
+#[derive(Default)]
+pub struct WriteFileTool {
+    root: Option<RootedFs>,
+}
+
+impl WriteFileTool {
+    /// Create an unconfined writer (current behavior).
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Create a writer confined to `root`.
+    pub fn rooted(root: RootedFs) -> Self {
+        Self { root: Some(root) }
+    }
+}
 
 #[async_trait]
 impl Tool for WriteFileTool {
@@ -46,14 +62,22 @@ impl Tool for WriteFileTool {
         }
         let params: Params = serde_json::from_value(params)?;
 
+        let path: PathBuf = match &self.root {
+            Some(jail) => match jail.resolve(&params.path) {
+                Ok(p) => p,
+                Err(e) => return Ok(ToolResult::error(e.to_string())),
+            },
+            None => PathBuf::from(&params.path),
+        };
+
         // Create parent directories if needed
-        if let Some(parent) = Path::new(&params.path).parent()
+        if let Some(parent) = path.parent()
             && !parent.as_os_str().is_empty()
         {
             std::fs::create_dir_all(parent)?;
         }
 
-        match std::fs::write(&params.path, &params.content) {
+        match std::fs::write(&path, &params.content) {
             Ok(()) => Ok(ToolResult::text(format!(
                 "Successfully wrote {} bytes to {}",
                 params.content.len(),
@@ -74,7 +98,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("test.txt");
 
-        let tool = WriteFileTool;
+        let tool = WriteFileTool::new();
         let result = tool
             .execute(serde_json::json!({
                 "path": path.to_str().unwrap(),
@@ -95,7 +119,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("nested").join("dir").join("test.txt");
 
-        let tool = WriteFileTool;
+        let tool = WriteFileTool::new();
         let result = tool
             .execute(serde_json::json!({
                 "path": path.to_str().unwrap(),
@@ -106,5 +130,30 @@ mod tests {
 
         assert!(!result.is_error);
         assert!(path.exists());
+    }
+
+    #[tokio::test]
+    async fn test_write_file_rooted_allows_inside_blocks_outside() {
+        use crate::confine::RootedFs;
+        let dir = TempDir::new().unwrap();
+        let jail = RootedFs::new(dir.path()).unwrap();
+        let tool = WriteFileTool::rooted(jail);
+
+        let ok = tool
+            .execute(serde_json::json!({ "path": "out.txt", "content": "hello" }))
+            .await
+            .unwrap();
+        assert!(!ok.is_error, "Error: {}", ok.content);
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("out.txt")).unwrap(),
+            "hello"
+        );
+
+        let blocked = tool
+            .execute(serde_json::json!({ "path": "/tmp/mux_confine_escape.txt", "content": "x" }))
+            .await
+            .unwrap();
+        assert!(blocked.is_error);
+        assert!(!std::path::Path::new("/tmp/mux_confine_escape.txt").exists());
     }
 }
