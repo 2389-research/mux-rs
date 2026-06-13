@@ -4,6 +4,7 @@
 pub use crate::agent::{
     AgentDefinition, AgentRegistry, FilteredRegistry, SubAgent, SubAgentResult, TaskTool,
 };
+pub use crate::confine::{ConfinementError, RootedFs};
 pub use crate::error::{LlmError, McpError, MuxError, PermissionError, ToolError};
 pub use crate::llm::{
     AnthropicClient, ContentBlock, LlmClient, Message, OpenAIClient, Request, Response, Role,

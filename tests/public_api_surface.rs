@@ -9,6 +9,7 @@ use mux::agent::{
     Preset as _, RunHandle as _, RunStatus as _, SubAgent as _, SubAgentResult as _, TaskTool as _,
     TranscriptStore as _,
 };
+use mux::confine::{ConfinementError as _, RootedFs as _};
 use mux::error::{
     LlmError as _, McpError as _, MuxError as _, PermissionError as _, ToolError as _,
 };
