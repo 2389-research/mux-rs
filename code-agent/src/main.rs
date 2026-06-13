@@ -220,7 +220,7 @@ async fn main() -> Result<()> {
     registry.register(ReadFileTool::new()).await;
     registry.register(WriteFileTool::new()).await;
     registry.register(SearchTool::new()).await;
-    registry.register(ListFilesTool).await;
+    registry.register(ListFilesTool::new()).await;
     registry.register(BashTool).await;
 
     let tools: Vec<_> = registry

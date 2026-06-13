@@ -113,7 +113,7 @@ impl MuxEngine {
         let builtin_tools: Vec<Arc<dyn Tool>> = vec![
             Arc::new(ReadFileTool::new()),
             Arc::new(WriteFileTool::new()),
-            Arc::new(ListFilesTool),
+            Arc::new(ListFilesTool::new()),
             Arc::new(SearchTool::new()),
             Arc::new(BashTool),
         ];
