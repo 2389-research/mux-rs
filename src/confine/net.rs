@@ -2,6 +2,9 @@
 // ABOUTME: resolves hosts and refuses any address a confined fetch must not reach.
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::sync::Arc;
+
+use crate::confine::ConfinementError;
 
 /// Returns false for any address a confined fetch must refuse: unspecified,
 /// loopback, RFC1918 private, link-local, CGNAT/shared (100.64/10), IPv6
@@ -59,4 +62,77 @@ fn is_globally_routable_v6(ip: Ipv6Addr) -> bool {
         return false;
     }
     true
+}
+
+/// A policy deciding which resolved IP addresses a confined fetch may reach.
+#[derive(Clone)]
+pub struct UrlPolicy {
+    predicate: Arc<dyn Fn(IpAddr) -> bool + Send + Sync>,
+}
+
+impl UrlPolicy {
+    /// The default policy: allow only globally-routable (public) addresses.
+    pub fn public_only() -> Self {
+        Self::custom(is_globally_routable)
+    }
+
+    /// A policy with a caller-supplied predicate over resolved IP addresses.
+    pub fn custom(f: impl Fn(IpAddr) -> bool + Send + Sync + 'static) -> Self {
+        Self {
+            predicate: Arc::new(f),
+        }
+    }
+
+    /// Whether a single resolved address is allowed.
+    pub fn allows(&self, ip: IpAddr) -> bool {
+        (self.predicate)(ip)
+    }
+
+    /// Resolve `host` and ensure every resolved address is allowed. IP-literal
+    /// hosts (optionally bracketed for IPv6) are checked directly without DNS.
+    pub async fn check_host(&self, host: &str) -> Result<(), ConfinementError> {
+        let bare = host
+            .strip_prefix('[')
+            .and_then(|s| s.strip_suffix(']'))
+            .unwrap_or(host);
+
+        if let Ok(ip) = bare.parse::<IpAddr>() {
+            return self.check_ip(host, ip);
+        }
+
+        // Port is irrelevant to the IP deny-list; 0 is fine for resolution.
+        let addrs = tokio::net::lookup_host((bare, 0u16))
+            .await
+            .map_err(|source| ConfinementError::Resolve {
+                host: host.to_string(),
+                source,
+            })?;
+
+        let mut saw_any = false;
+        for addr in addrs {
+            saw_any = true;
+            self.check_ip(host, addr.ip())?;
+        }
+        if !saw_any {
+            return Err(ConfinementError::Resolve {
+                host: host.to_string(),
+                source: std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "host resolved to no addresses",
+                ),
+            });
+        }
+        Ok(())
+    }
+
+    fn check_ip(&self, host: &str, ip: IpAddr) -> Result<(), ConfinementError> {
+        if self.allows(ip) {
+            Ok(())
+        } else {
+            Err(ConfinementError::BlockedAddress {
+                host: host.to_string(),
+                ip,
+            })
+        }
+    }
 }

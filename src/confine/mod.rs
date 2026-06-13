@@ -5,7 +5,7 @@ mod fs;
 mod net;
 
 pub use fs::RootedFs;
-pub use net::is_globally_routable;
+pub use net::{UrlPolicy, is_globally_routable};
 
 use std::net::IpAddr;
 use std::path::PathBuf;
