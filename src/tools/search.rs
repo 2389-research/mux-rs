@@ -216,5 +216,10 @@ mod tests {
             .await
             .unwrap();
         assert!(result.is_error);
+        assert!(
+            result.content.contains("escapes") || result.content.contains("confinement"),
+            "expected a confinement rejection, got: {}",
+            result.content
+        );
     }
 }

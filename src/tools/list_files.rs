@@ -179,6 +179,11 @@ mod tests {
             .await
             .unwrap();
         assert!(blocked.is_error);
+        assert!(
+            blocked.content.contains("escapes") || blocked.content.contains("confinement"),
+            "expected a confinement rejection, got: {}",
+            blocked.content
+        );
     }
 
     #[cfg(unix)]
@@ -197,5 +202,10 @@ mod tests {
             .await
             .unwrap();
         assert!(blocked.is_error);
+        assert!(
+            blocked.content.contains("escapes") || blocked.content.contains("confinement"),
+            "expected a confinement rejection, got: {}",
+            blocked.content
+        );
     }
 }
