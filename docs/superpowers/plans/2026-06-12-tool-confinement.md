@@ -2426,7 +2426,7 @@ git commit -m "docs(confine): add Confining mux guide and changelog entry"
 - [ ] Run the full workspace suite: `cargo test --workspace` → all green.
 - [ ] Run the linter as CI does: `cargo clippy --workspace --all-targets` → no warnings (the workspace lints set `clippy::all = "warn"` and `unused = "warn"`; pre-commit enforces).
 - [ ] Run the formatter check: `cargo fmt --all --check` → clean.
-- [ ] Confirm no behavior change for non-opted-in callers: `cargo test -p mux read_file write_file edit search list_files web_fetch` → all pre-existing tests still pass unchanged.
+- [ ] Confirm no behavior change for non-opted-in callers: `cargo test -p mux -- read_file write_file edit search list_files web_fetch` → all pre-existing tests still pass unchanged. (The filters go after `--`; `cargo test` accepts only one test-name positional before it.)
 - [ ] Open the PR for issue #20 via `superpowers:finishing-a-development-branch`.
 
 ---
