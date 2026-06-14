@@ -2,6 +2,16 @@
 
 All notable changes to this project are documented in this file.
 
+## [Unreleased]
+
+### Added
+
+- **Opt-in tool confinement (`mux::confine`).** Two off-by-default guardrails for the built-in tools, with no behavior change for existing callers.
+  - **Filesystem jail.** `RootedFs::new(root)` plus `ReadFileTool::rooted`, `WriteFileTool::rooted`, `EditTool::rooted`, `SearchTool::rooted`, and `ListFilesTool::rooted` confine the five filesystem tools to a canonicalized root, rejecting `..` traversal and symlink escapes and dropping glob hits that resolve outside the root. Violations return a tool error result rather than aborting the run.
+  - **`web_fetch` SSRF guard.** `WebFetchTool::guarded()` (and `with_url_policy`) deny unspecified/loopback/RFC1918/link-local/CGNAT/ULA addresses via `UrlPolicy::public_only()` / `is_globally_routable`, re-validating every redirect hop with manual redirect following.
+  - **FFI.** Additive `MuxEngine::new_confined(data_dir, root)` builds a rooted filesystem toolset for the Swift/Kotlin consumer; the existing `new` is unchanged.
+  - New public symbols `RootedFs`, `UrlPolicy`, `ConfinementError`, and `is_globally_routable` are exported from `mux::confine` and the prelude. See `docs/confining-mux.md`. This is in-process defense against a confused/injected model — not a sandbox; the filesystem jail is moot unless `bash` is also dropped or OS-sandboxed.
+
 ## [0.14.0] - 2026-06-09
 
 ### Added

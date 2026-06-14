@@ -1,9 +1,12 @@
 // ABOUTME: EditTool - precise string replacement in files.
 // ABOUTME: Requires unique matches to prevent accidental overwrites.
 
+use std::path::PathBuf;
+
 use async_trait::async_trait;
 use serde::Deserialize;
 
+use crate::confine::RootedFs;
 use crate::tool::{Tool, ToolResult};
 
 /// Tool for precise string replacement in files.
@@ -11,7 +14,22 @@ use crate::tool::{Tool, ToolResult};
 /// Unlike WriteFileTool which overwrites entire files, EditTool performs
 /// targeted string replacement. It requires the old_string to be unique
 /// in the file (unless replace_all is true) to prevent accidental changes.
-pub struct EditTool;
+#[derive(Default)]
+pub struct EditTool {
+    root: Option<RootedFs>,
+}
+
+impl EditTool {
+    /// Create an unconfined editor (current behavior).
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Create an editor confined to `root`.
+    pub fn rooted(root: RootedFs) -> Self {
+        Self { root: Some(root) }
+    }
+}
 
 #[derive(Deserialize)]
 struct EditParams {
@@ -63,8 +81,16 @@ impl Tool for EditTool {
     async fn execute(&self, params: serde_json::Value) -> Result<ToolResult, anyhow::Error> {
         let params: EditParams = serde_json::from_value(params)?;
 
+        let file_path: PathBuf = match &self.root {
+            Some(jail) => match jail.resolve(&params.file_path) {
+                Ok(p) => p,
+                Err(e) => return Ok(ToolResult::error(e.to_string())),
+            },
+            None => PathBuf::from(&params.file_path),
+        };
+
         // Read the file
-        let content = match std::fs::read_to_string(&params.file_path) {
+        let content = match std::fs::read_to_string(&file_path) {
             Ok(c) => c,
             Err(e) => {
                 return Ok(ToolResult::error(format!(
@@ -102,7 +128,7 @@ impl Tool for EditTool {
         };
 
         // Write the file
-        match std::fs::write(&params.file_path, &new_content) {
+        match std::fs::write(&file_path, &new_content) {
             Ok(()) => {
                 let msg = if params.replace_all && occurrences > 1 {
                     format!(
@@ -133,7 +159,7 @@ mod tests {
         let path = dir.path().join("test.txt");
         std::fs::write(&path, "Hello, world!").unwrap();
 
-        let tool = EditTool;
+        let tool = EditTool::new();
         let result = tool
             .execute(serde_json::json!({
                 "file_path": path.to_str().unwrap(),
@@ -156,7 +182,7 @@ mod tests {
         let path = dir.path().join("test.txt");
         std::fs::write(&path, "Hello, world!").unwrap();
 
-        let tool = EditTool;
+        let tool = EditTool::new();
         let result = tool
             .execute(serde_json::json!({
                 "file_path": path.to_str().unwrap(),
@@ -176,7 +202,7 @@ mod tests {
         let path = dir.path().join("test.txt");
         std::fs::write(&path, "foo bar foo baz foo").unwrap();
 
-        let tool = EditTool;
+        let tool = EditTool::new();
         let result = tool
             .execute(serde_json::json!({
                 "file_path": path.to_str().unwrap(),
@@ -201,7 +227,7 @@ mod tests {
         let path = dir.path().join("test.txt");
         std::fs::write(&path, "foo bar foo baz foo").unwrap();
 
-        let tool = EditTool;
+        let tool = EditTool::new();
         let result = tool
             .execute(serde_json::json!({
                 "file_path": path.to_str().unwrap(),
@@ -221,7 +247,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_edit_file_not_found() {
-        let tool = EditTool;
+        let tool = EditTool::new();
         let result = tool
             .execute(serde_json::json!({
                 "file_path": "/nonexistent/path/file.txt",
@@ -242,7 +268,7 @@ mod tests {
         let content = "fn main() {\n    println!(\"Hello\");\n}\n";
         std::fs::write(&path, content).unwrap();
 
-        let tool = EditTool;
+        let tool = EditTool::new();
         let result = tool
             .execute(serde_json::json!({
                 "file_path": path.to_str().unwrap(),
@@ -264,7 +290,7 @@ mod tests {
         let path = dir.path().join("test.txt");
         std::fs::write(&path, "line1\nline2\nline3\n").unwrap();
 
-        let tool = EditTool;
+        let tool = EditTool::new();
         let result = tool
             .execute(serde_json::json!({
                 "file_path": path.to_str().unwrap(),
@@ -278,5 +304,41 @@ mod tests {
 
         let content = std::fs::read_to_string(&path).unwrap();
         assert_eq!(content, "first\nsecond\nline3\n");
+    }
+
+    #[tokio::test]
+    async fn test_edit_rooted_allows_inside_blocks_outside() {
+        use crate::confine::RootedFs;
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("inside.txt");
+        std::fs::write(&path, "Hello, world!").unwrap();
+        let jail = RootedFs::new(dir.path()).unwrap();
+        let tool = EditTool::rooted(jail);
+
+        let ok = tool
+            .execute(serde_json::json!({
+                "file_path": "inside.txt",
+                "old_string": "world",
+                "new_string": "Rust"
+            }))
+            .await
+            .unwrap();
+        assert!(!ok.is_error, "Error: {}", ok.content);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "Hello, Rust!");
+
+        let blocked = tool
+            .execute(serde_json::json!({
+                "file_path": "/etc/passwd",
+                "old_string": "root",
+                "new_string": "pwned"
+            }))
+            .await
+            .unwrap();
+        assert!(blocked.is_error);
+        assert!(
+            blocked.content.contains("escapes") || blocked.content.contains("confinement"),
+            "expected a confinement rejection, got: {}",
+            blocked.content
+        );
     }
 }

@@ -9,6 +9,7 @@ use mux::agent::{
     Preset as _, RunHandle as _, RunStatus as _, SubAgent as _, SubAgentResult as _, TaskTool as _,
     TranscriptStore as _,
 };
+use mux::confine::{ConfinementError as _, RootedFs as _, UrlPolicy as _};
 use mux::error::{
     LlmError as _, McpError as _, MuxError as _, PermissionError as _, ToolError as _,
 };
@@ -48,4 +49,5 @@ fn public_api_surface_is_stable() {
     let _ = &mux::agent::WRITER;
     let _ = mux::agent::all_presets;
     let _ = mux::agent::get_preset as fn(&str) -> _;
+    let _ = mux::confine::is_globally_routable as fn(std::net::IpAddr) -> bool;
 }
